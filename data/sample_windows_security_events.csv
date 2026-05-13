@@ -1,0 +1,11 @@
+TimeCreated,EventID,TargetUserName,IpAddress,LogonType,FailureReason
+2026-05-10T09:00:00,4625,bob,10.10.10.25,3,Unknown user name or bad password
+2026-05-10T09:00:05,4625,bob,10.10.10.25,3,Unknown user name or bad password
+2026-05-10T09:00:10,4625,bob,10.10.10.25,3,Unknown user name or bad password
+2026-05-10T09:00:15,4625,bob,10.10.10.25,3,Unknown user name or bad password
+2026-05-10T09:00:19,4625,bob,10.10.10.25,3,Unknown user name or bad password
+2026-05-10T09:00:27,4624,bob,10.10.10.25,3,
+2026-05-10T09:04:00,4624,alice,192.168.10.17,10,
+2026-05-10T09:04:11,4624,carol,192.168.10.17,10,
+2026-05-10T09:04:23,4625,dave,192.168.10.17,10,Unknown user name or bad password
+2026-05-10T09:04:37,4624,erin,192.168.10.17,10,
