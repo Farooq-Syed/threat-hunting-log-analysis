@@ -14,7 +14,11 @@ import json
 import re
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import matplotlib
+
+# Use a non-interactive backend so plotting works on headless machines and CI.
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402  (import after backend selection)
 import pandas as pd
 
 
@@ -79,7 +83,30 @@ def load_logs(path: Path, input_format: str) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
+    # Normalise status early so every downstream check can rely on it.
+    dataframe["status"] = dataframe["status"].astype(str).str.strip().str.lower()
+
+    # Parse timestamps into a real datetime column used for ordering. Chronological
+    # ordering matters for the success-after-failures correlation: sorting the raw
+    # syslog strings sorts them lexically ("Dec" < "Feb" < "Jan"), which is wrong.
+    dataframe["event_time"] = parse_timestamps(dataframe["timestamp"])
+
     return dataframe
+
+
+def parse_timestamps(values: pd.Series) -> pd.Series:
+    """Best-effort parse of the mixed timestamp formats this tool ingests.
+
+    Handles ISO CSV timestamps and Windows TimeCreated directly. Linux syslog
+    timestamps ("May 10 08:00:01") carry no year, so pandas assumes the current
+    one, which keeps ordering within a single log correct. Anything unparseable
+    falls back to NaT and is sorted last rather than crashing the run.
+    """
+    parsed = pd.to_datetime(values, errors="coerce", format="mixed")
+    if parsed.isna().all():
+        # Older pandas without format="mixed" support, or an exotic format.
+        parsed = pd.to_datetime(values, errors="coerce")
+    return parsed
 
 
 def parse_linux_auth_log(path: Path) -> pd.DataFrame:
@@ -116,14 +143,14 @@ def parse_windows_events_csv(path: Path) -> pd.DataFrame:
     dataframe = pd.read_csv(path)
     rows = []
     for _, row in dataframe.iterrows():
-        event_id = int(row["EventID"])
+        event_id = _coerce_event_id(row.get("EventID"))
         if event_id not in {4624, 4625}:
             continue
-        username = str(row.get("TargetUserName", row.get("AccountName", "unknown"))).strip()
-        source_ip = str(row.get("IpAddress", row.get("SourceNetworkAddress", "unknown"))).strip() or "unknown"
+        username = _first_present(row, ["TargetUserName", "AccountName"], default="unknown")
+        source_ip = _first_present(row, ["IpAddress", "SourceNetworkAddress"], default="unknown")
         rows.append(
             {
-                "timestamp": row.get("TimeCreated", row.get("timestamp", "")),
+                "timestamp": _first_present(row, ["TimeCreated", "timestamp"], default=""),
                 "username": username,
                 "source_ip": source_ip,
                 "event_type": "windows_logon",
@@ -133,8 +160,37 @@ def parse_windows_events_csv(path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _coerce_event_id(value: object) -> int:
+    """Return the event id as an int, or -1 for blank/non-numeric cells.
+
+    Windows exports occasionally contain rows with an empty or malformed EventID
+    (trailing blank lines, merged exports). A bare int() would raise; here such
+    rows simply fail the {4624, 4625} membership test and are skipped.
+    """
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return -1
+
+
+def _first_present(row: pd.Series, columns: list[str], default: str) -> str:
+    """First non-empty value across candidate columns, else the default.
+
+    Unlike Series.get(col, fallback), this treats NaN/empty strings as absent, so
+    a present-but-null TargetUserName correctly falls through to AccountName.
+    """
+    for column in columns:
+        if column in row.index:
+            value = row[column]
+            if pd.notna(value) and str(value).strip():
+                return str(value).strip()
+    return default
+
+
 def detect_bruteforce(dataframe: pd.DataFrame, threshold: int) -> pd.DataFrame:
-    failures = dataframe[dataframe["status"].str.lower() == "failed"].copy()
+    failures = dataframe[dataframe["status"] == "failed"].copy()
+    if failures.empty:
+        return pd.DataFrame(columns=["source_ip", "username", "failed_attempts"])
     counts = failures.groupby(["source_ip", "username"]).size().reset_index(name="failed_attempts")
     return counts[counts["failed_attempts"] >= threshold]
 
@@ -142,7 +198,9 @@ def detect_bruteforce(dataframe: pd.DataFrame, threshold: int) -> pd.DataFrame:
 def detect_success_after_failures(dataframe: pd.DataFrame, threshold: int) -> pd.DataFrame:
     suspicious_rows = []
     for (source_ip, username), group in dataframe.groupby(["source_ip", "username"]):
-        group = group.sort_values("timestamp")
+        # Sort chronologically by the parsed datetime, not the raw string. NaT
+        # timestamps sort last so undated rows do not reorder dated ones.
+        group = group.sort_values("event_time", na_position="last")
         failed_count = 0
         for _, row in group.iterrows():
             status = str(row["status"]).lower()
@@ -173,6 +231,10 @@ def detect_unusual_ip_activity(dataframe: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
+    # A single source IP has zero standard deviation, so the cutoff collapses to
+    # the value itself and nothing is ever "unusual". Skip in that degenerate case.
+    if len(activity) < 2:
+        return activity.iloc[0:0].copy()
     event_cutoff = activity["total_events"].mean() + activity["total_events"].std(ddof=0)
     user_cutoff = activity["unique_users"].mean() + activity["unique_users"].std(ddof=0)
     return activity[(activity["total_events"] > event_cutoff) | (activity["unique_users"] > user_cutoff)].copy()
@@ -241,7 +303,7 @@ def generate_plots(dataframe: pd.DataFrame, report: pd.DataFrame, plot_dir: Path
     plot_dir.mkdir(parents=True, exist_ok=True)
     plt.style.use("ggplot")
 
-    failed_counts = dataframe[dataframe["status"].str.lower() == "failed"].groupby("source_ip").size().sort_values(ascending=False).head(8)
+    failed_counts = dataframe[dataframe["status"] == "failed"].groupby("source_ip").size().sort_values(ascending=False).head(8)
     fig, ax = plt.subplots(figsize=(9, 5))
     failed_counts.plot(kind="bar", ax=ax, color="#c1121f")
     ax.set_title("Top Source IPs by Failed Logins")

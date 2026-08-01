@@ -2,6 +2,16 @@
 
 This project analyzes authentication data to identify brute-force behavior, suspicious successful logins after repeated failures, and source IPs with unusual activity patterns.
 
+## Results at a glance
+
+![Results panel](assets/results_panel.png)
+
+Run against a Linux `auth.log`, the tool processes the events, correlates repeated
+failures into brute-force findings, and flags the successful login that follows —
+catching the attacker at `203.0.113.5` who guessed the `admin` password after five
+failures. See [PAPER.md](PAPER.md) for the method and [JOURNAL.md](JOURNAL.md) for the
+development notes.
+
 It supports three input styles:
 
 - normalized CSV authentication logs
