@@ -75,6 +75,23 @@ Run a Windows Security event export:
 python log_hunter.py --input data/sample_windows_security_events.csv --format windows-events
 ```
 
+## Larger synthetic dataset
+
+The bundled samples are small and hand-built. For a run with more weight,
+`generate_auth_logs.py` produces a larger synthetic normalized-CSV log that mixes
+normal activity with brute-force and password-spraying bursts. The data is synthetic
+(generated user names, IPs, and timing), intended for demonstration rather than as a
+benchmark — for real evaluation, point the tool at genuine `auth.log` or Windows
+event exports.
+
+```powershell
+python generate_auth_logs.py --rows 3000 --output data/synthetic_auth_logs.csv
+python log_hunter.py --input data/synthetic_auth_logs.csv --format csv
+```
+
+On a 3,000-event run this surfaces on the order of 50 findings across all three
+detectors (brute force, success-after-failures, and unusual source-IP activity).
+
 ## Output
 
 The script writes:
