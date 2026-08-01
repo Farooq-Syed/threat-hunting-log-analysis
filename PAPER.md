@@ -1,6 +1,10 @@
 # Correlating Authentication Telemetry for Credential-Attack Detection: A Multi-Format Threat Hunting Tool
 
-*A project write-up. Syed, 2026.*
+**Farooq Syed** · M.S. in Computer and Information Security Systems, Eastern Illinois University · 2026
+
+*Independent research portfolio, prepared as part of a PhD application in cybersecurity.
+Developed with AI coding assistance; all methods, experiments, and findings were
+directed, reviewed, and verified by the author.*
 
 ## Abstract
 
