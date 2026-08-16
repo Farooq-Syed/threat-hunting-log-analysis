@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import matplotlib
@@ -38,16 +39,20 @@ LINUX_SUCCESS_PATTERN = re.compile(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze authentication logs for suspicious behavior.")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Path to the input log file.")
-    parser.add_argument("--format", default="auto", choices=["auto", "csv", "linux-auth", "windows-events"], help="Input format.")
+    parser.add_argument("--format", default="auto", choices=["auto", "csv", "linux-auth", "windows-events", "evtx"], help="Input format.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Path to write the hunting report CSV.")
     parser.add_argument("--summary", default=DEFAULT_SUMMARY, help="Path to write the JSON summary.")
     parser.add_argument("--plot-dir", default=DEFAULT_PLOT_DIR, help="Directory for output plots.")
     parser.add_argument("--failed-threshold", type=int, default=5, help="Failed login threshold for brute-force detection.")
+    parser.add_argument("--window-minutes", type=int, default=5, help="Width of the time window for burst detection.")
+    parser.add_argument("--lateral-window-hours", type=int, default=24, help="Hours within which a change of source IP is treated as possible lateral movement.")
     return parser
 
 
 def detect_format(path: Path) -> str:
     suffix = path.suffix.lower()
+    if suffix == ".evtx":
+        return "evtx"
     if suffix == ".log":
         return "linux-auth"
     if suffix == ".csv":
@@ -72,6 +77,8 @@ def load_logs(path: Path, input_format: str) -> pd.DataFrame:
         dataframe = parse_linux_auth_log(path)
     elif resolved_format == "windows-events":
         dataframe = parse_windows_events_csv(path)
+    elif resolved_format == "evtx":
+        dataframe = parse_evtx(path)
     else:
         raise ValueError(f"Unsupported format: {resolved_format}")
 
@@ -187,6 +194,74 @@ def _first_present(row: pd.Series, columns: list[str], default: str) -> str:
     return default
 
 
+def parse_evtx(path: Path) -> pd.DataFrame:
+    """Parse a Windows EVTX log for logon events (4624 success / 4625 failure).
+
+    The binary container is read with python-evtx; each record is a small XML
+    document that is then converted with parse_evtx_record_xml, which is pure and
+    unit-tested in isolation. The dependency is optional in the sense that this
+    function imports it lazily and reports a clear message when it is missing.
+    """
+    try:
+        from Evtx.Evtx import Evtx
+    except ImportError as error:
+        raise ImportError(
+            "Parsing .evtx files requires the 'python-evtx' package. "
+            "Install it with: python -m pip install python-evtx"
+        ) from error
+
+    rows = []
+    with Evtx(str(path)) as log:
+        for record in log.records():
+            rows.append(parse_evtx_record_xml(record.xml()))
+    return pd.DataFrame(rows)
+
+
+def parse_evtx_record_xml(xml_text: str) -> dict:
+    """Convert one EVTX record's XML into the tool's event schema.
+
+    Iteration is namespaces-agnostic on purpose: EVTX records carry a default
+    XML namespace that varies across Windows versions and export tooling, and a
+    fixed namespace prefix would silently match nothing on real files.
+    """
+    root = ET.fromstring(xml_text)
+    event_id = -1
+    timestamp = ""
+    username = ""
+    source_ip = ""
+
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1]  # strip any namespace prefix
+        if tag == "EventID":
+            event_id = _coerce_event_id(element.text)
+        elif tag == "TimeCreated":
+            timestamp = element.get("SystemTime", "")
+        elif tag == "Data":
+            name = (element.get("Name") or "").lower()
+            value = (element.text or "").strip()
+            if name in {"targetusername", "accountname"} and not username:
+                username = value
+            elif name in {"ipaddress", "sourceip", "ip"} and not source_ip:
+                source_ip = value
+
+    if event_id not in {4624, 4625}:
+        return {
+            "timestamp": timestamp,
+            "username": "unknown",
+            "source_ip": "unknown",
+            "event_type": "windows_logon",
+            "status": "skipped",
+        }
+
+    return {
+        "timestamp": timestamp,
+        "username": username or "unknown",
+        "source_ip": source_ip or "unknown",
+        "event_type": "windows_logon",
+        "status": "success" if event_id == 4624 else "failed",
+    }
+
+
 def detect_bruteforce(dataframe: pd.DataFrame, threshold: int) -> pd.DataFrame:
     failures = dataframe[dataframe["status"] == "failed"].copy()
     if failures.empty:
@@ -240,10 +315,83 @@ def detect_unusual_ip_activity(dataframe: pd.DataFrame) -> pd.DataFrame:
     return activity[(activity["total_events"] > event_cutoff) | (activity["unique_users"] > user_cutoff)].copy()
 
 
-def build_report(dataframe: pd.DataFrame, failed_threshold: int) -> pd.DataFrame:
+def detect_burst_activity(dataframe: pd.DataFrame, window_minutes: int, min_failures: int) -> pd.DataFrame:
+    """Flag source IPs with a dense run of failures inside a short time window.
+
+    The count-based brute-force detector treats a slow drip of five failures over
+    two days identically to five failures in a minute. This detector separates the
+    two: for each source it walks its failures in time order and measures how many
+    fall inside a trailing window of window_minutes. A source whose peak window
+    reaches min_failures is reported once, at its densest moment.
+    """
+    failures = dataframe[dataframe["status"] == "failed"]
+    if failures.empty:
+        return pd.DataFrame(columns=["source_ip", "event_time", "peak_failures"])
+    cutoff = pd.Timedelta(minutes=window_minutes)
+
+    records = []
+    for source_ip, group in failures.groupby("source_ip"):
+        times = group["event_time"].sort_values().to_numpy()
+        for index, current in enumerate(times):
+            if pd.isna(current):
+                continue
+            window_start = current - cutoff
+            in_window = (times >= window_start) & (times <= current)
+            records.append((source_ip, current, int(in_window.sum())))
+
+    bursts = pd.DataFrame(records, columns=["source_ip", "event_time", "failures_in_window"])
+    bursts = bursts[bursts["failures_in_window"] >= min_failures]
+    if bursts.empty:
+        return pd.DataFrame(columns=["source_ip", "event_time", "peak_failures"])
+    best = bursts.loc[bursts.groupby("source_ip")["failures_in_window"].idxmax()]
+    best = best.rename(columns={"failures_in_window": "peak_failures"}).reset_index(drop=True)
+    return best[["source_ip", "event_time", "peak_failures"]]
+
+
+def detect_lateral_movement(dataframe: pd.DataFrame, window_hours: int) -> pd.DataFrame:
+    """Flag accounts that authenticate successfully from a new source after a prior one.
+
+    A successful logon from one address followed, within window_hours, by another
+    successful logon from a different address for the same account is the classic
+    shape of a compromised credential being replayed from a second host. Only
+    distinct consecutive successes are compared, so a user who alternates between
+    two known IPs in the normal course of work is reported at most once per pair.
+    """
+    successes = dataframe[dataframe["status"] == "success"]
+    if successes.empty:
+        return pd.DataFrame(columns=["timestamp", "username", "source_ip", "details"])
+
+    cutoff = pd.Timedelta(hours=window_hours)
+    findings = []
+    for username, group in successes.groupby("username"):
+        group = group.sort_values("event_time")
+        history: list[tuple] = []
+        for row in group.itertuples():
+            if pd.isna(row.event_time):
+                continue
+            history.append((row.event_time, row.source_ip, row.timestamp))
+        for index in range(1, len(history)):
+            previous_time, previous_ip, _ = history[index - 1]
+            current_time, current_ip, current_stamp = history[index]
+            if previous_ip != current_ip and (current_time - previous_time) <= cutoff:
+                findings.append(
+                    {
+                        "timestamp": current_stamp,
+                        "username": username,
+                        "source_ip": current_ip,
+                        "details": f"previously authenticated from {previous_ip}",
+                    }
+                )
+                break
+    return pd.DataFrame(findings)
+
+
+def build_report(dataframe: pd.DataFrame, failed_threshold: int, window_minutes: int = 5, lateral_window_hours: int = 24) -> pd.DataFrame:
     brute_force = detect_bruteforce(dataframe, failed_threshold)
     success_after_failures = detect_success_after_failures(dataframe, failed_threshold)
     unusual_ip_activity = detect_unusual_ip_activity(dataframe)
+    burst_activity = detect_burst_activity(dataframe, window_minutes, failed_threshold)
+    lateral_movement = detect_lateral_movement(dataframe, lateral_window_hours)
 
     findings = []
     for _, row in brute_force.iterrows():
@@ -261,6 +409,28 @@ def build_report(dataframe: pd.DataFrame, failed_threshold: int) -> pd.DataFrame
         findings.append(
             {
                 "finding_type": "successful_login_after_failures",
+                "source_ip": row["source_ip"],
+                "username": row["username"],
+                "severity": "high",
+                "details": row["details"],
+            }
+        )
+
+    for _, row in burst_activity.iterrows():
+        findings.append(
+            {
+                "finding_type": "burst_brute_force",
+                "source_ip": row["source_ip"],
+                "username": "multiple",
+                "severity": "high",
+                "details": f"{int(row['peak_failures'])} failed logins within {window_minutes} minutes",
+            }
+        )
+
+    for _, row in lateral_movement.iterrows():
+        findings.append(
+            {
+                "finding_type": "lateral_movement",
                 "source_ip": row["source_ip"],
                 "username": row["username"],
                 "severity": "high",
@@ -333,7 +503,7 @@ def main() -> None:
     plot_dir = Path(args.plot_dir)
 
     dataframe = load_logs(input_path, args.format)
-    report = build_report(dataframe, args.failed_threshold)
+    report = build_report(dataframe, args.failed_threshold, args.window_minutes, args.lateral_window_hours)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report.to_csv(output_path, index=False)

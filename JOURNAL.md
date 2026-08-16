@@ -123,3 +123,25 @@ behavior correct on inputs the samples don't cover.
   so a slow drip over a week looks the same as a burst in 30 seconds.
 - Enrich source IPs with geo / threat intel so "unusual" has more to lean on than
   volume.
+
+## Feature pass: burst, lateral movement, and EVTX
+
+Added the two detectors from the wish list and knocked out the EVTX note too:
+
+- **Burst detection.** The count detector really does treat a slow drip and a 30-second
+  burst the same way, and I'd flagged that as a limitation. detect_burst_activity
+  walks each source's failures in time order and reports the densest trailing window.
+  The test that matters: five failures one minute apart flag, five failures hours
+  apart don't. Writing that test was the whole point - it pins the difference the
+  count detector can't see.
+- **Lateral movement.** A success from a new source within the window is the shape of
+  a replayed credential. I kept it to distinct consecutive successes so a user who
+  alternates between two known IPs doesn't get spammed.
+- **EVTX.** The Windows path used to depend on a CSV export someone else made.
+  parse_evtx reads the binary container with python-evtx and hands each record's
+  XML to a pure conversion function. I kept the conversion namespaces-agnostic on
+  purpose - EVTX namespace prefixes vary across Windows versions and I didn't want a
+  fix that silently matched nothing.
+
+The sample CSV that used to yield 4 findings now yields 6 (a burst and a lateral
+finding on top of the original hits). Test count is up to 26.
