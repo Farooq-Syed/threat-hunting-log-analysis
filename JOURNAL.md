@@ -111,7 +111,7 @@ out of order, and asserts the count is right. That test would have failed agains
 old string-sort code, which is the whole point — it pins the bug so it can't quietly
 come back.
 
-Final state: 12 tests, all green (was 2, both red). Re-ran the tool on all three
+Final state: 17 tests, all green (was 2, both red). Re-ran the tool on all three
 formats afterward and the finding counts matched what I wrote down at the start
 (4 / 3 / 2), so the fixes didn't change behavior on the samples — they just made the
 behavior correct on inputs the samples don't cover.

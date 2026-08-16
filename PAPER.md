@@ -23,7 +23,7 @@ multi-format data. During this work I identified and fixed a timestamp-ordering
 defect that silently corrupted the success-after-failure correlation on any log
 spanning more than one calendar month, and I raised test coverage from two
 end-to-end smoke tests (both failing due to an environment portability defect) to a
-twelve-test suite covering each detector in isolation.
+seventeen-test suite covering each detector in isolation.
 
 ## 1. Introduction
 
@@ -138,7 +138,7 @@ subprocess matches the test interpreter, and a third smoke test covers the Windo
 format. A new unit suite exercises each detector directly on hand-constructed frames,
 including a regression test for the timestamp defect that supplies deliberately
 out-of-order month-name timestamps and asserts the correct failure count. The suite
-now stands at twelve tests, all passing.
+now stands at seventeen tests, all passing.
 
 ## 5. Limitations
 
