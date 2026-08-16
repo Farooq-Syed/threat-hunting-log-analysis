@@ -1,0 +1,18 @@
+{
+  "generated": "2026-08-16",
+  "unit_tests": 26,
+  "status": "all passing",
+  "sample_results": {
+    "normalized_csv": {"events": 19, "findings": 6},
+    "linux_auth_log": {"events": 11, "findings": 5},
+    "windows_security_events": {"events": 10, "findings": 3}
+  },
+  "detectors": [
+    "brute_force_attempt",
+    "successful_login_after_failures",
+    "burst_brute_force",
+    "lateral_movement",
+    "unusual_source_ip_activity"
+  ],
+  "notes": "Finding counts include the two newer detectors (burst + lateral movement) on top of the original three."
+}
