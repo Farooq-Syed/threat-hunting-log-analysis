@@ -1,6 +1,6 @@
 # Credential-Attack Detection across Authentication Logs: What a Tool for Three Log Formats Taught Me
 
-**Farooq Syed** · M.S. in Computer and Information Security Systems, Eastern Illinois University · 2026
+**Farooq Syed** · M.S. in Computer and Information Security Systems, Eastern Illinois University · 2023
 
 *Independent research portfolio, prepared as part of a PhD application in cybersecurity.
 Developed with AI coding assistance; all methods, experiments, and findings were
