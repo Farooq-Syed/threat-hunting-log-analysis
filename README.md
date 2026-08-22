@@ -6,6 +6,10 @@
 
 This project analyzes authentication data to identify brute-force behavior, suspicious successful logins after repeated failures, source IPs with unusual activity patterns, dense bursts of failures within a short window, and accounts that start authenticating from a new source - the shape of a replayed credential.
 
+Developed with AI coding assistance; the author chose the log formats, detection
+logic, evaluation framing, debugging direction, and final interpretation of the
+results.
+
 ## Results at a glance
 
 ![Results panel](assets/results_panel.png)
@@ -14,7 +18,8 @@ Run against a Linux `auth.log`, the tool processes the events, correlates repeat
 failures into brute-force findings, and flags the successful login that follows -
 catching the attacker at `203.0.113.5` who guessed the `admin` password after five
 failures. See [PAPER.md](PAPER.md) for the method and [JOURNAL.md](JOURNAL.md) for the
-development notes.
+development notes. For source and technique citations, see
+[REFERENCES.md](REFERENCES.md).
 
 It supports four input styles:
 
@@ -141,3 +146,9 @@ This project is designed around common authentication telemetry:
 - enrich source IPs with geo or threat intel
 - treat the detectors as a small ensemble with explicit reasoning about which alert to look at first
 - add a notebook for Windows-specific investigation examples
+
+## Authorship and AI use
+
+- The project framing, detection rules, and claims are the author's.
+- AI assistance was used for coding support and drafting help.
+- The author reviewed, edited, tested, and verified the final code and write-up.
