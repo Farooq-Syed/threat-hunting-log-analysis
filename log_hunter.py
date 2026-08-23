@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--failed-threshold", type=int, default=5, help="Failed login threshold for brute-force detection.")
     parser.add_argument("--window-minutes", type=int, default=5, help="Width of the time window for burst detection.")
     parser.add_argument("--lateral-window-hours", type=int, default=24, help="Hours within which a change of source IP is treated as possible lateral movement.")
+    parser.add_argument("--agreement-output", default="", help="Optional path to write cross-detector agreement JSON.")
     return parser
 
 
@@ -498,6 +499,64 @@ def build_report(dataframe: pd.DataFrame, failed_threshold: int, window_minutes:
     return report
 
 
+def detector_agreement(dataframe: pd.DataFrame, failed_threshold: int,
+                       window_minutes: int = 5, lateral_window_hours: int = 24) -> dict:
+    """Measure how much the detectors agree, per source IP.
+
+    Each detector keys on a different unit (some on a source:user pair, some on a
+    source IP, one on a username). To compare them we lift every detector's output to
+    the source-IP level and ask: how often do two detectors flag the same IP, and how
+    often do they disagree? High pairwise overlap means the signals are redundant; low
+    overlap means the detectors are genuinely complementary (e.g. a slow-drip brute
+    force that the count detector sees but the burst detector does not). That
+    disagreement is the reason to treat them as an ensemble rather than a single alert.
+    """
+    def _ips(result: pd.DataFrame) -> set:
+        if result.empty or "source_ip" not in result.columns:
+            return set()
+        return set(result["source_ip"].astype(str))
+
+    flagged: dict[str, set] = {
+        "bruteforce": _ips(detect_bruteforce(dataframe, failed_threshold)),
+        "success_after_failures": _ips(detect_success_after_failures(dataframe, failed_threshold)),
+        "burst": _ips(detect_burst_activity(dataframe, window_minutes, failed_threshold)),
+        "lateral": _ips(detect_lateral_movement(dataframe, lateral_window_hours)),
+        "unusual_ip": _ips(detect_unusual_ip_activity(dataframe)),
+    }
+    all_ips = sorted(set().union(*flagged.values()))
+    names = list(flagged)
+
+    pairwise = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = names[i], names[j]
+            inter = len(flagged[a] & flagged[b])
+            union = len(flagged[a] | flagged[b])
+            left = len(flagged[a])
+            right = len(flagged[b])
+            denominator = min(left, right)
+            pairwise.append({
+                "detector_a": a,
+                "detector_b": b,
+                "shared_ips": inter,
+                "jaccard": round(inter / union, 3) if union else 0.0,
+                "coflag_rate": round(inter / denominator, 3) if denominator else 0.0,
+                "a_flagged": left,
+                "b_flagged": right,
+            })
+
+    flagged_count = sum(1 for ip in all_ips if sum(ip in s for s in flagged.values()) == 1)
+    coflagged = sum(1 for ip in all_ips if sum(ip in s for s in flagged.values()) >= 2)
+
+    return {
+        "per_detector_flagged_ips": {name: len(flagged[name]) for name in names},
+        "total_distinct_ips_flagged": len(all_ips),
+        "ips_flagged_by_1_detector_only": flagged_count,
+        "ips_flagged_by_2_or_more": coflagged,
+        "pairwise": pairwise,
+    }
+
+
 def save_summary(report: pd.DataFrame, summary_path: Path) -> None:
     summary = {
         "findings_count": int(len(report)),
@@ -554,6 +613,13 @@ def main() -> None:
     print(f"Report written to: {output_path}")
     print(f"Summary written to: {summary_path}")
     print(f"Plots written to: {plot_dir}")
+
+    if args.agreement_output:
+        agreement = detector_agreement(dataframe, args.failed_threshold, args.window_minutes, args.lateral_window_hours)
+        agreement_path = Path(args.agreement_output)
+        agreement_path.parent.mkdir(parents=True, exist_ok=True)
+        agreement_path.write_text(json.dumps(agreement, indent=2), encoding="utf-8")
+        print(f"Agreement written to: {agreement_path}")
 
 
 if __name__ == "__main__":

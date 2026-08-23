@@ -127,5 +127,39 @@ class EvtxRecordParsingTests(unittest.TestCase):
         self.assertEqual(record["status"], "skipped")
 
 
+class DetectorAgreementTests(unittest.TestCase):
+    def _frame(self):
+        base = pd.Timestamp("2026-01-01 00:00:00")
+        rows = []
+        # IP A: 6 failures within ~2 minutes, then a success -> bruteforce + burst +
+        # success_after_failures all fire on it.
+        for i, minute in enumerate([0, 1, 1, 2, 2, 3]):
+            rows.append({"timestamp": base, "username": "bob", "source_ip": "10.0.0.9",
+                         "status": "failed", "event_time": base + pd.Timedelta(minutes=minute)})
+        rows.append({"timestamp": base, "username": "bob", "source_ip": "10.0.0.9",
+                     "status": "success", "event_time": base + pd.Timedelta(minutes=4)})
+        # IP B: 6 failures spread over 6 hours -> bruteforce fires, burst does not
+        # (outside the window), and there is no success. This is the detector that a
+        # rules-only view would flag but the burst view would miss -> disagreement.
+        for hour in range(6):
+            rows.append({"timestamp": base, "username": "carol", "source_ip": "10.0.0.42",
+                         "status": "failed", "event_time": base + pd.Timedelta(hours=hour)})
+        return pd.DataFrame(rows)
+
+    def test_agreement_measures_partial_overlap(self):
+        agreement = log_hunter.detector_agreement(self._frame(), failed_threshold=5,
+                                                 window_minutes=5, lateral_window_hours=24)
+        self.assertEqual(agreement["per_detector_flagged_ips"]["bruteforce"], 2)
+        self.assertEqual(agreement["per_detector_flagged_ips"]["burst"], 1)
+        self.assertEqual(agreement["per_detector_flagged_ips"]["success_after_failures"], 1)
+        self.assertEqual(agreement["total_distinct_ips_flagged"], 2)
+        # One IP is flagged by a single detector only (the slow-drip brute force).
+        self.assertEqual(agreement["ips_flagged_by_1_detector_only"], 1)
+        # bruteforce and burst overlap on the one genuine burst IP.
+        pair = {tuple(sorted((p["detector_a"], p["detector_b"]))): p for p in agreement["pairwise"]}
+        self.assertAlmostEqual(pair[("bruteforce", "burst")]["jaccard"], 0.5)
+        self.assertEqual(agreement["ips_flagged_by_2_or_more"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
