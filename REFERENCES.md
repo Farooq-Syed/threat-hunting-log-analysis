@@ -1,5 +1,11 @@
 # References
 
+## Enterprise authentication data
+
+- A. D. Kent, "Comprehensive, Multi-Source Cyber-Security Events," Los Alamos
+  National Laboratory, 2015. DOI: 10.17021/1179829.
+- Dataset landing page and schema: https://csr.lanl.gov/data/cyber1/
+
 ## Threat and log-source references
 
 1. MITRE ATT&CK, technique T1110: *Brute Force.*

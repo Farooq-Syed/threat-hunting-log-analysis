@@ -125,5 +125,26 @@ class WindowsParsingTests(unittest.TestCase):
         )
 
 
+class LanlParsingTests(unittest.TestCase):
+    def test_parses_official_auth_schema_and_skips_malformed_rows(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "auth.txt"
+            path.write_text(
+                "1,C625$@DOM1,U147@DOM1,C625,C625,Negotiate,Batch,LogOn,Success\n"
+                "2,U10@DOM1,U20@DOM1,C10,C20,Kerberos,Network,LogOn,Failure\n"
+                "malformed,row\n",
+                encoding="utf-8",
+            )
+            frame = log_hunter.parse_lanl_auth(path)
+
+        self.assertEqual(len(frame), 2)
+        self.assertEqual(frame.iloc[0]["source_ip"], "C625")
+        self.assertEqual(frame.iloc[0]["status"], "success")
+        self.assertEqual(frame.iloc[1]["status"], "failed")
+        self.assertEqual(frame.iloc[1]["destination"], "C20")
+
+
 if __name__ == "__main__":
     unittest.main()

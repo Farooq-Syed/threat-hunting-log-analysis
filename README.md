@@ -21,12 +21,38 @@ failures. See [PAPER.md](PAPER.md) for the method and [JOURNAL.md](JOURNAL.md) f
 development notes. For source and technique citations, see
 [REFERENCES.md](REFERENCES.md).
 
-It supports four input styles:
+It supports five input styles:
 
 - normalized CSV authentication logs
 - Linux `auth.log` style SSH events
 - Windows Security event exports focused on logon activity
 - Windows `.evtx` files directly (via `python-evtx`)
+- LANL comprehensive cyber-data authentication records (`--format lanl-auth`)
+
+## LANL enterprise-data path
+
+The parser now accepts the de-identified authentication schema published by Los
+Alamos National Laboratory: epoch time, source/destination users, source/destination
+computers, authentication and logon types, orientation, and outcome. LANL source
+computers are retained as source identifiers in the normalized `source_ip` field so
+the existing hunting layer can operate without inventing network addresses.
+
+The parser is tested against the official schema examples. A full external detection
+result is not claimed here: LANL distributes the 7.2 GB authentication corpus through
+a download form, and the complete corpus plus the red-team ground truth must be run
+before reporting operational recall or false-positive rates.
+
+After obtaining the files from LANL, the streaming evaluator avoids loading the full
+corpus into memory and records input hashes plus the official DOI:
+
+```powershell
+python evaluate_lanl.py --auth auth.txt.gz --redteam redteam.txt.gz `
+  --output results/lanl_external_validation.json
+```
+
+The evaluator reports exact ground-truth event coverage and lateral-movement pair
+recall for red-team users. Its candidate precision is explicitly scoped to those users
+and must not be presented as a global false-positive rate.
 
 ## Features
 

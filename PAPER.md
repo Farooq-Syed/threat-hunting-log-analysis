@@ -58,6 +58,13 @@ that normalization belongs in the tool, not the analyst.
 
 ## 2. What the tool does
 
+The ingestion layer now also supports Los Alamos National Laboratory's de-identified
+enterprise authentication schema. A separate streaming evaluator can compare the
+7.2 GB authentication corpus with LANL's red-team ground truth without loading the
+full file into memory. Because the complete corpus requires LANL's download form,
+this revision verifies the schema and evaluator but does not claim a full-corpus
+operational recall or false-positive rate.
+
 ### 2.1 Ingestion
 
 Format is either declared or auto-detected. Linux logs are parsed with two regular

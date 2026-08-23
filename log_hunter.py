@@ -10,6 +10,7 @@ Supported input formats:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -39,7 +40,7 @@ LINUX_SUCCESS_PATTERN = re.compile(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze authentication logs for suspicious behavior.")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Path to the input log file.")
-    parser.add_argument("--format", default="auto", choices=["auto", "csv", "linux-auth", "windows-events", "evtx"], help="Input format.")
+    parser.add_argument("--format", default="auto", choices=["auto", "csv", "linux-auth", "windows-events", "evtx", "lanl-auth"], help="Input format.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Path to write the hunting report CSV.")
     parser.add_argument("--summary", default=DEFAULT_SUMMARY, help="Path to write the JSON summary.")
     parser.add_argument("--plot-dir", default=DEFAULT_PLOT_DIR, help="Directory for output plots.")
@@ -79,6 +80,8 @@ def load_logs(path: Path, input_format: str) -> pd.DataFrame:
         dataframe = parse_windows_events_csv(path)
     elif resolved_format == "evtx":
         dataframe = parse_evtx(path)
+    elif resolved_format == "lanl-auth":
+        dataframe = parse_lanl_auth(path)
     else:
         raise ValueError(f"Unsupported format: {resolved_format}")
 
@@ -141,6 +144,42 @@ def parse_linux_auth_log(path: Path) -> pd.DataFrame:
                     "source_ip": success_match.group("source_ip"),
                     "event_type": "ssh_login",
                     "status": "success",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def parse_lanl_auth(path: Path) -> pd.DataFrame:
+    """Parse LANL comprehensive cyber-data authentication records.
+
+    The official schema is:
+    time,source user,destination user,source computer,destination computer,
+    authentication type,logon type,orientation,success/failure.
+
+    LANL identifiers are de-identified host names rather than IP addresses. They
+    are retained in ``source_ip`` so the existing detector layer can operate on
+    a stable source-identifier field without special cases.
+    """
+    rows = []
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        for fields in csv.reader(handle):
+            if len(fields) != 9:
+                continue
+            try:
+                epoch_seconds = int(fields[0])
+            except ValueError:
+                continue
+            outcome = fields[8].strip().lower()
+            if outcome not in {"success", "failure"}:
+                continue
+            rows.append(
+                {
+                    "timestamp": pd.to_datetime(epoch_seconds, unit="s", utc=True).isoformat(),
+                    "username": fields[1].strip() or "unknown",
+                    "source_ip": fields[3].strip() or "unknown",
+                    "destination": fields[4].strip() or "unknown",
+                    "event_type": "lanl_authentication",
+                    "status": "success" if outcome == "success" else "failed",
                 }
             )
     return pd.DataFrame(rows)
