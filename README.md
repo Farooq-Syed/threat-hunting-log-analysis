@@ -40,7 +40,10 @@ the existing hunting layer can operate without inventing network addresses.
 The parser is tested against the official schema examples. A full external detection
 result is not claimed here: LANL distributes the 7.2 GB authentication corpus through
 a download form, and the complete corpus plus the red-team ground truth must be run
-before reporting operational recall or false-positive rates.
+before reporting operational recall or false-positive rates. The **research question
+and the locked, leakage-resistant evaluation protocol** are defined in
+[PUBLICATION_PLAN.md](PUBLICATION_PLAN.md); the manual data-request steps are in
+[LANL_ACQUISITION.md](LANL_ACQUISITION.md).
 
 After obtaining the files from LANL, the streaming evaluator avoids loading the full
 corpus into memory and records input hashes plus the official DOI:

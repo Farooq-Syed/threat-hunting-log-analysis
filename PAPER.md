@@ -10,6 +10,14 @@ the final code and write-up.*
 See [REFERENCES.md](REFERENCES.md) for the threat and event-source citations most
 relevant to this project.
 
+> **Publication status.** This project currently measures *engineering correctness*, not a
+> real-data detection result. The focused, falsifiable research question and the locked,
+> leakage-resistant evaluation protocol are defined in [PUBLICATION_PLAN.md](PUBLICATION_PLAN.md)
+> (Phases 1-2). Phases 3-4 — measuring precision/recall, alert burden, and time-to-detection on
+> real labeled data — require the LANL authentication corpus, which is distributed through a
+> manual request form (see [LANL_ACQUISITION.md](LANL_ACQUISITION.md)). The claims in this paper
+> are scoped to what the current evidence supports.
+
 ## Abstract
 
 Brute forcing, password spraying, and the compromise that follows a successful guess
@@ -33,6 +41,14 @@ went: a timestamp-ordering bug that silently corrupted the success-after-failure
 correlation on any log spanning more than one calendar month, a test suite that
 failed because it spawned the wrong Python interpreter, and an input-boundary
 design where every new format is assumed to be slightly different from the samples.
+
+**The research question this work is being pointed at** is deliberately narrow and
+falsifiable (see [PUBLICATION_PLAN.md](PUBLICATION_PLAN.md) Phase 1): *when a
+defender has only authentication events, how early can a simple, transparent
+detector flag a credential-compromise campaign, and what is the analyst alert
+burden at that operating point?* The current evidence — a synthetic, small test
+corpus and a corrected multi-format ingestion path — supports the *engineering*
+claims below but is **not yet evidence of real detection performance**.
 
 ## 1. Why authentication logs
 
@@ -153,11 +169,17 @@ the EVTX record conversion).
 ## 4. Limitations
 
 - The corpus is synthetic; no claim is made about detection rates on real traffic.
+- No real-data detection result is reported. The LANL evaluator (`evaluate_lanl.py`) is schema-
+  verified and streaming, but the full corpus is distributed through LANL's request form
+  (see [LANL_ACQUISITION.md](LANL_ACQUISITION.md)), so Phases 3-4 of the publication plan remain
+  to be run once the corpus is obtained.
 - Syslog year inference assumes the current year and does not handle rotation
   across a New Year boundary.
 - The lateral-movement detector compares consecutive successes only; it cannot see
   a first-time source that never appeared before in the window.
 - The source-IP anomaly flag uses volume alone, with no enrichment or reputation.
+- Ground truth for a real corpus is the red-team set only; intrusions not in the red-team set
+  would be invisible to the label (affecting measured recall, not precision).
 
 ## 5. Future work
 
