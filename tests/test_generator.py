@@ -21,7 +21,7 @@ class AuthLogGeneratorTests(unittest.TestCase):
         self.assertEqual(len(frame), 500)
         self.assertEqual(
             list(frame.columns),
-            ["timestamp", "username", "source_ip", "event_type", "status"],
+            ["timestamp", "username", "source_ip", "event_type", "status", "scenario_type", "scenario_id"],
         )
 
     def test_contains_both_statuses(self):
@@ -45,6 +45,12 @@ class AuthLogGeneratorTests(unittest.TestCase):
         frame = gen.generate(rows=300, seed=2)
         stamps = frame["timestamp"].tolist()
         self.assertEqual(stamps, sorted(stamps))
+
+    def test_scenario_columns_present(self):
+        frame = gen.generate(rows=300, seed=4)
+        self.assertIn("scenario_type", frame.columns)
+        self.assertIn("scenario_id", frame.columns)
+        self.assertTrue(frame["scenario_type"].notna().all())
 
 
 if __name__ == "__main__":

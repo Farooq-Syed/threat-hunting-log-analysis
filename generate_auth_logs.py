@@ -45,7 +45,7 @@ def _normal_activity(rng, start, rows):
         ip = rng.choice(INTERNAL_IPS)
         # mostly successes, occasional genuine failed attempt
         status = "failed" if rng.random() < 0.12 else "success"
-        records.append((t, user, ip, "login", status))
+        records.append((t, user, ip, "login", status, "normal_activity"))
     return records
 
 
@@ -56,12 +56,14 @@ def _brute_force(rng, start):
     user = rng.choice(USERS)
     ip = rng.choice(EXTERNAL_IPS)
     n_fail = int(rng.integers(6, 25))
+    scenario = "brute_force_attempt"
     for _ in range(n_fail):
         t += timedelta(seconds=int(rng.integers(1, 8)))
-        records.append((t, user, ip, "login", "failed"))
+        records.append((t, user, ip, "login", "failed", scenario))
     if rng.random() < 0.4:  # sometimes the attacker eventually gets in
+        scenario = "successful_login_after_failures"
         t += timedelta(seconds=int(rng.integers(1, 8)))
-        records.append((t, user, ip, "login", "success"))
+        records.append((t, user, ip, "login", "success", scenario))
     return records
 
 
@@ -74,7 +76,7 @@ def _password_spray(rng, start):
     for user in targets:
         for _ in range(int(rng.integers(1, 4))):
             t += timedelta(seconds=int(rng.integers(2, 20)))
-            records.append((t, user, ip, "login", "failed"))
+            records.append((t, user, ip, "login", "failed", "password_spray"))
     return records
 
 
@@ -96,8 +98,20 @@ def generate(rows: int, seed: int) -> pd.DataFrame:
 
     records = records[:rows]
     records.sort(key=lambda r: r[0])
-    frame = pd.DataFrame(records, columns=["timestamp", "username", "source_ip",
-                                           "event_type", "status"])
+    frame = pd.DataFrame(
+        records,
+        columns=[
+            "timestamp",
+            "username",
+            "source_ip",
+            "event_type",
+            "status",
+            "scenario_type",
+        ],
+    )
+    frame["scenario_id"] = (
+        frame["scenario_type"].ne(frame["scenario_type"].shift()).cumsum().map(lambda value: f"s{value:05d}")
+    )
     frame["timestamp"] = frame["timestamp"].map(lambda d: d.isoformat())
     return frame
 
