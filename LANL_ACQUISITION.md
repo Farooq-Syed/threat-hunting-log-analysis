@@ -51,6 +51,29 @@ current THLA experiment, which is authentication-only.)
    python -c "import gzip; f=gzip.open('auth.txt.gz','rt'); [print(next(f).strip()) for _ in range(3)]"
    ```
 
+## Measured corpus scale (this project's files)
+
+| File | Count | Single-pass time (this machine) |
+|---|---|---|
+| `auth.txt.gz` | **1,051,430,459 lines** | > 20 min, out-of-memory — **not runnable inline** |
+| `redteam.txt.gz` | 749 events / 104 users (epoch 150,885 - 2,557,047, i.e. days ~1.7-29.6) | instant |
+| `dns.txt.gz` | 40.8M rows | ~34 s (fast) |
+| `proc.txt.gz` | >=40M rows (2.2 GB) | ~31 s (fast) |
+| `flows.txt.gz` | 1.0 GB | untested |
+
+**Ground-truth scope (critical).** The official LANL `redteam.txt.gz` is defined **only for the
+authentication source** (`time, user, source_computer, destination_computer`). There is no
+separate DNS / process / flow ground-truth file in the release. Therefore the only
+scientifically valid real-data experiment in this project is on the **authentication corpus**.
+
+**Compute requirement.** The 1.05 B auth rows mean a full streaming parse is only feasible on a
+machine with substantial RAM and/or a long wall-clock budget (the compact pass alone needs to
+parse and filter ~1 B rows; the raw byte-count took 185 s, `int()`-per-line took > 9 min, and
+holding the windowed subset in a Python list was out-of-memory). A `scripts/compact_lanl_auth.py`
+is provided that streams and writes a windowed parquet in chunks; it must be run to completion
+in an environment that can sustain a 7.2 GB gzip pass (several GB RAM free, ~20-40 min). The
+downstream Phase 3-4 evaluation then reads only the compact parquet and is fast.
+
 ## Run the streaming evaluator
 
 ```powershell
