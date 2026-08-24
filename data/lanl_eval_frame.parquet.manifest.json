@@ -1,0 +1,15 @@
+{
+  "input": "data\\lanl_auth_window.parquet",
+  "redteam_events": 749,
+  "context_hours": 24.0,
+  "context_seconds": 86400,
+  "keep_frac": 0.05,
+  "scanned": 375537431,
+  "kept_context": 311481167,
+  "kept_sampled": 3202598,
+  "output_file_bytes": 2212056967,
+  "output_sha256": "a8109871665df36c79a764c54c013f52f98b8a3911a3ff6b2efc2318fe8d6a58",
+  "elapsed_seconds": 1451.0,
+  "sampling_note": "Sampled evaluation frame: all red-team context kept; non-context events sampled per (day,key) at keep_frac via a deterministic FNV-1a hash gate. Alert-burden and false-positive-per-host-day estimates are CONDITIONAL on this frame, not population-wide unless sampling weights are applied. Red-team ground truth is never subsampled.",
+  "completed": true
+}

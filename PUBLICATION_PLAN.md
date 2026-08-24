@@ -165,6 +165,33 @@ ready to run the moment it is obtained:
 - **Phase 4:** the B1–B4 baselines, plus sensitivity to `window_minutes`, `failed_threshold`,
   missing events, and class imbalance.
 
+### Evaluation implementation status
+
+The evaluator is **online and stateful** (`scripts/online_lanl_eval.py`): for each
+(src_user, src_computer) key it keeps only the state each detector needs (failure/success
+counts, first/last event time, last failure time, a bounded trailing-window failure deque, a
+per-user recent-success trail, and per-detector "already alerted" flags + first-alert time).
+Events are processed chronologically (the frame is time-sorted via SQLite), and an alert is
+emitted the first time a detector's threshold is crossed. The alert time is therefore the
+**first threshold crossing**, not the last failure, so time-to-detection is valid.
+
+Correctness properties pinned by `tests/test_online_lanl_eval.py` (7 tests):
+- train-period (pre-split) events never contribute to test detection;
+- only **test-period** red-team events are in the recall denominator;
+- red-team matching is keyed by **(src_user, src_computer)**, not source alone;
+- each red-team event can be matched at most once (no reuse);
+- pre-attack alerts (before the ground-truth event) are **false positives**;
+- time-to-detection is **non-negative** (alert must occur at/after the red-team event).
+
+**FPR and alert-burden are separate metrics.** `alerts_per_analyst_day` is the raw alert
+burden. `fpr_proxy` is reported as false alerts per **negative (key, day)** window in the test
+period (a documented proxy for FPR, because the negative denominator is key-day windows, not a
+defined negative-event set). Both are **conditional on the sampled eval frame** — they are not
+population-wide unless sampling weights are applied.
+
+The 24-hour context window intentionally produces a large frame (a documented consequence of
+the detector's temporal horizon); the online evaluator is the memory-safe way to run it.
+
 ---
 
 ## Honest limits the paper must state

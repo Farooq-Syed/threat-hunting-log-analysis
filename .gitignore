@@ -2,3 +2,26 @@ output/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Large LANL evaluation artifacts (regenerable via scripts/compact_lanl_auth.py,
+# scripts/build_lanl_eval_frame.py, scripts/online_lanl_eval.py; raw corpus is on E:).
+data/lanl_auth_window.parquet
+data/lanl_auth_window.parquet.stage1.txt
+data/lanl_auth_window.parquet.tmp
+data/lanl_eval_frame.parquet
+data/lanl_eval_frame.parquet.tmp
+data/lanl_online.db
+data/lanl_keys.db
+data/lanl_keys_stream.db
+data/lanl_keys_stream.db-journal
+data/lanl_scope_counts.parquet
+data/lanl_key_agg.parquet
+data/_agg_counts.parquet
+data/_agg_counts.json
+*.db-journal
+# ephemeral run logs
+_compact.log
+_frame.log
+_eval.log
+_online.log
+_compact.err
