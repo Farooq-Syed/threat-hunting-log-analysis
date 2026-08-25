@@ -1,8 +1,9 @@
-# THLA Publication Plan — Phase 1 & 2 (frozen for review)
+# THLA Publication Protocol and Completed LANL Evaluation
 
-**Project:** `threat-hunting-log-analysis` · **Status:** Phase 1-2 frozen; Phases 3-4 blocked on
-real-data access (LANL acquisition). This document is the review-facing spec; it is not a
-claim of results.
+**Project:** `threat-hunting-log-analysis` · **Status:** protocol implemented and the full
+314,683,765-event online evaluation completed. Real metrics are in
+`results/lanl_online.json` and `REAL_DATA_RESULTS.md`. Unrun sensitivity and stronger-baseline
+experiments remain future work and are not presented as completed evidence.
 
 ---
 
@@ -77,23 +78,21 @@ the same campaign or time period can appear in both train and test.
   record is a 4-tuple `(time, user, source_computer, destination_computer)`; any detector alert
   that covers the same `(user, source, destination)` campaign within a defined **acceptable
   delay window** counts as a detection of that ground-truth event.
-- **Ground-truth→alert matching** is defined *before* seeing detector output. Two matching rules,
-  decided a priori:
-  - **Event-match:** an alert's `(source, user, destination)` equals a red-team triple, raised at
-    any time ≥ the red-team event time (never earlier — no look-ahead).
-  - **Delay window:** an alert that matches but is raised more than `T_det=30 min` after the
-    red-team event is counted as a *late* detection, and its cohort is attributed to
-    time-to-detection rather than recall.
-- **Benign / false-positive frame:** all non-red-team alerts are false positives **unless** they
-  can be attributed to a red-team campaign. Because the ground truth is campaign-level and
-  severe-imbalance, false positives are reported per host per day (operational), not as a global
-  accuracy number.
+- **Ground-truth→alert matching** was fixed before scoring. An alert matches the next unused
+  red-team event for the same `(src_user, src_computer)` key when its timestamp is from the
+  ground-truth time through 30 minutes afterward. Pre-event alerts never match, and each
+  red-team event can be used once per detector.
+- **Benign / false-positive frame:** every unmatched alert is a false positive. False alerts
+  are reported both as alerts per represented test day and per negative
+  `(src_user, src_computer, day)` window. The latter is explicitly an FPR proxy, not a
+  population event-level false-positive rate.
 
 ### 2.4 Temporal train/test split (and campaign holdout)
 
-- **Primary split — temporal (day-gated).** Sort the 58 days chronologically. Use days 1–40 as
-  **train**, days 41–58 as **test**. No event from the test days is used in training.
-- **Campaign holdout (extra-rigorous).** Do NOT put all red-team campaigns in training. Hold out
+- **Primary split — temporal (day-gated).** Sort chronologically and split at day 15, the
+  realized locked operating point used by the evaluator. Events before day 15 are train-side;
+  events at or after day 15 are test-side. No train event can trigger a test alert.
+- **Campaign holdout (planned, not completed).** A future extension should hold out
   entire red-team *campaigns* (by the campaign/user-group implied by the red-team records) from
   training so the test measures **unseen-campaign** generalization, not re-detection of a known
   campaign. If campaign identity is not cleanly separable, use the temporal split as the primary
@@ -110,60 +109,60 @@ the same campaign or time period can appear in both train and test.
 - **Ground-truth in scope:** the red-team events that fall in the test days/campaigns. Red-team
   events in the train partition are used only to validate the matching procedure, not to detect.
 
-### 2.6 Baselines (Phase 4 — fair comparison)
+### 2.6 Comparator status
 
-At minimum, compare the proposed detector against:
+The completed run reports four transparent detector outputs individually and a count-based
+statistical diagnostic. The comparator plan is:
 - **B1 — fixed-rule baseline:** a static count threshold on failures per (source, user)
   (e.g. ≥5, ≥10) with no training.
-- **B2 — frequency/statistical baseline:** per-source / per-account failure rate relative to a
-  train-learned normal profile (z-score or mean+stdev cutoff), thresholds chosen on a train
-  validation split.
-- **B3 — ML baseline (one):** a supervised classifier (e.g. LogisticRegression or RandomForest)
+- **B2 — frequency/statistical diagnostic (completed):** per-source failure count relative to
+  the train mean plus two standard deviations. It is not user-keyed and therefore is reported
+  as context rather than a directly matched detection baseline.
+- **B3 — ML baseline (planned):** a supervised classifier (e.g. LogisticRegression or RandomForest)
   on hand-labeled train windows — *if* a window-level label can be derived from the red-team
   ground truth without leakage. Document the label derivation explicitly.
-- **B4 — proposed method:** THLA's detector ensemble (brute-force count, success-after-failure,
-  burst, lateral, unusual-source).
+- **B4 — transparent detector set (completed individually):** brute-force count,
+  success-after-failure, burst, and lateral movement. No learned ensemble result is claimed.
 
-All baselines share the same input representation, the same temporal/campaign split, and the
-same alert-matching rule.
+Any future comparator must share the same sampled frame, realized temporal split, and
+alert-matching rule. A future campaign-holdout comparison must likewise use one common,
+predeclared campaign partition.
 
-### 2.7 Threshold-selection procedure (validation only)
+### 2.7 Threshold procedure
 
-- Every threshold (`failed_threshold`, `window_minutes`, `lateral_window_hours`, and any ML
-  decision threshold / contamination) is selected on a **train-validation split** (held-out
-  subset of the train days/campaigns) by optimizing the target operating metric (e.g.
-  precision at a target recall, or FP-per-host/day at a floor recall). The selected value is
-  then applied **once** to the untouched test partition.
-- Explicitly forbidden: choosing any threshold using test-partition labels. The chosen
-  thresholds and their validation objective are recorded in `results/protocol_thresholds.json`.
+- The completed headline run uses fixed, documented thresholds chosen before scoring:
+  `failed_threshold=5`, `window_minutes=5`, and `lateral_window_hours=24`. They were not tuned
+  on test labels. Sensitivity across these values remains a required follow-up experiment.
+- Explicitly forbidden: choosing any threshold using test-partition labels. The realized
+  thresholds are recorded in the metadata of `results/lanl_online.json`.
 
 ### 2.8 Seeds, reproducibility, and commands
 
 - Fixed seed `0` for any stochastic element (ML CV folds, sampling); document any randomness.
-- Commands (run after LANL files are in place):
+- Completed evaluation command (after building the sampled frame as documented in
+  `REAL_DATA_RESULTS.md`):
   ```
-  python evaluate_lanl.py --auth <LANL>/auth.txt.gz --redteam <LANL>/redteam.txt.gz \
-      --window-hours 24 --output results/lanl_external_validation.json
+  python scripts/online_lanl_eval.py --input data/lanl_eval_frame.parquet \
+      --redteam <LANL>/redteam.txt.gz --split-day 15 --delay-minutes 30 \
+      --failed-threshold 5 --window-minutes 5 --lateral-hours 24 \
+      --output results/lanl_online.json
   ```
-  Plus the metric runner (Phase 3 tooling — see below) for precision/recall/PR-AUC/ROC-AUC,
-  FP-per-host-per-day, time-to-detection, coverage-by-campaign, and per-{user,host,day,campaign}
-  confidence intervals.
-- `requirements.txt` already pins deps; add a `requirements-lock.txt` freeze before the run.
+- The exact compaction and frame-building commands are recorded in `REAL_DATA_RESULTS.md`.
 
 ---
 
-## Phase 3-4 — metrics and baselines (to run once the corpus is in place)
+## Phase 3-4 — completed headline metrics and remaining extensions
 
-Phase 1-2 above deliberately front-loads the protocol. Phase 3-4 need the LANL corpus and are
-ready to run the moment it is obtained:
+The headline online run is complete. It reports precision, recall, F1, alert burden, the
+key-day FPR proxy, and TTD for four transparent detectors. The following items remain
+extensions rather than completed evidence:
 
-- **Phase 3 metrics:** precision, recall, PR-AUC, ROC-AUC (where a score exists),
-  **false positives per host/day** and **alerts per analyst/day**, **time-to-detection**,
-  **detection coverage by campaign**, a **stricter temporal/campaign holdout**, and
-  **confidence intervals** across users/hosts/days/campaigns. Alert burden and time-to-detection
-  are required, not optional.
-- **Phase 4:** the B1–B4 baselines, plus sensitivity to `window_minutes`, `failed_threshold`,
-  missing events, and class imbalance.
+- **Completed:** precision, recall, F1, alerts per represented test day, key-day FPR proxy, and
+  time-to-detection for the four transparent detectors under the day-15 split.
+- **Remaining:** detection coverage by campaign, uncertainty across stable campaign/day units,
+  a campaign holdout, a directly matchable sequence/graph or ML baseline, sampling-weighted
+  burden, and pre-registered sensitivity to `window_minutes`, `failed_threshold`, lateral
+  horizon, missing events, and background sampling rate.
 
 ### Evaluation implementation status
 

@@ -10,51 +10,50 @@ the final code and write-up.*
 See [REFERENCES.md](REFERENCES.md) for the threat and event-source citations most
 relevant to this project.
 
-> **Publication status.** This project currently measures *engineering correctness*, not a
-> real-data detection result. The focused, falsifiable research question and the locked,
-> leakage-resistant evaluation protocol are defined in [PUBLICATION_PLAN.md](PUBLICATION_PLAN.md)
-> (Phases 1-2). Phases 3-4 — measuring precision/recall, alert burden, and time-to-detection on
-> real labeled data — require the LANL authentication corpus, which is distributed through a
-> manual request form (see [LANL_ACQUISITION.md](LANL_ACQUISITION.md)). The claims in this paper
-> are scoped to what the current evidence supports.
+> **Publication status.** The full LANL experiment is complete. The online evaluator streamed
+> a 314,683,765-event evaluation frame, used a day-15 temporal split, and scored 86 test-period
+> red-team events without look-ahead. The result is negative: the three count/correlation
+> detectors detected no red-team events, while the lateral-movement rule reached recall 0.372
+> at precision 0.0001 and an unusable alert burden. Metrics are conditional on the documented
+> 24-hour-context plus 5% background sample; the reported FPR is explicitly a key-day proxy,
+> not a population false-positive rate.
 
 ## Abstract
 
-Brute forcing, password spraying, and the compromise that follows a successful guess
-all leave traces in authentication logs — but rarely in a format you can compare
-across machines. A Linux host writes SSH history as free text, a Windows domain
-controller records Security events 4624/4625, and a SIEM hands back a tidy CSV that
-has forgotten where it came from. This project is a small command-line tool that
+Brute forcing, password spraying, and compromise following a successful guess
+can leave traces in authentication logs, but the formats differ across systems.
+A Linux host writes SSH history as free text, a Windows domain controller records
+Security events 4624/4625, and a SIEM may provide a normalized CSV with reduced
+source context. This project is a command-line tool that
 folds all three into one event representation and then runs a set of detectors over
 the result: failure counting per source and account, correlation of a successful
 login with the failures that immediately preceded it, density of failures within a
 short time window, and a volume-based flag for sources that behave unlike their
 peers. A later pass added two detectors that look at *change* rather than counts —
 an account that succeeds from one address and then from another inside a day —
-and a direct `.evtx` parser so the Windows path no longer depends on someone else's
-CSV export.
+and a direct `.evtx` parser so the Windows path does not depend on a separate CSV export.
 
-The value of this project was never supposed to be a new algorithm; the detectors
-are all conventional. It is an implementation that is careful about the failure
-modes that only show up on real, mixed-format data. That is where the actual work
-went: a timestamp-ordering bug that silently corrupted the success-after-failure
+The contribution is not a new detection algorithm; the detectors are conventional.
+It is an implementation and evaluation focused on failure modes that arise in
+mixed-format data. The engineering work included correcting a timestamp-ordering
+bug that silently corrupted the success-after-failure
 correlation on any log spanning more than one calendar month, a test suite that
 failed because it spawned the wrong Python interpreter, and an input-boundary
 design where every new format is assumed to be slightly different from the samples.
 
-**The research question this work is being pointed at** is deliberately narrow and
-falsifiable (see [PUBLICATION_PLAN.md](PUBLICATION_PLAN.md) Phase 1): *when a
-defender has only authentication events, how early can a simple, transparent
-detector flag a credential-compromise campaign, and what is the analyst alert
-burden at that operating point?* The current evidence — a synthetic, small test
-corpus and a corrected multi-format ingestion path — supports the *engineering*
-claims below but is **not yet evidence of real detection performance**.
+The real-data question is deliberately narrow and falsifiable: *when a defender has only
+authentication events, how early can simple, transparent detectors flag a credential-
+compromise campaign, and what alert burden do they create?* On the sampled LANL frame, the
+answer is unfavorable. Simple count and correlation rules do not separate the test-period
+red-team activity from benign background at usable operating points. This is evidence about
+the locked protocol and sampled frame, not a claim about every credential detector or every
+enterprise network.
 
 ## 1. Why authentication logs
 
-Authentication logs are the highest-value, lowest-cost telemetry a defender has. A
-failed logon is cheap to record and, in aggregate, tells a clear story: sustained
-failures against one account from one address is a brute-force attempt; a success
+Authentication logs are a widely available, comparatively low-cost telemetry source. A
+failed logon is inexpensive to record and, in aggregate, can indicate a recognizable pattern: sustained
+failures against one account from one address can indicate a brute-force attempt; a success
 that lands after such a run is a plausible compromise; a single address touching an
 unusual number of distinct accounts is spraying. None of this requires payload
 inspection or endpoint agents — just the login record itself.
@@ -74,12 +73,12 @@ that normalization belongs in the tool, not the analyst.
 
 ## 2. What the tool does
 
-The ingestion layer now also supports Los Alamos National Laboratory's de-identified
-enterprise authentication schema. A separate streaming evaluator can compare the
-7.2 GB authentication corpus with LANL's red-team ground truth without loading the
-full file into memory. Because the complete corpus requires LANL's download form,
-this revision verifies the schema and evaluator but does not claim a full-corpus
-operational recall or false-positive rate.
+The ingestion layer also supports Los Alamos National Laboratory's de-identified enterprise
+authentication schema. A memory-bounded evaluator processed the source corpus into a
+314.7-million-event frame and streamed it chronologically against LANL's red-team ground
+truth. The frame retains 24-hour context around all 749 red-team events and a deterministic
+5% background sample, so alert burden and the key-day FPR proxy are conditional on that frame
+rather than population-wide estimates.
 
 ### 2.1 Ingestion
 
@@ -142,6 +141,27 @@ alone.
 
 ## 3. Evaluation
 
+### 3.1 Full LANL temporal evaluation
+
+The primary evaluation splits at day 15. Test detectors process events online, and no
+pre-split event can trigger a test alert. Ground-truth matching uses `(source user, source
+computer)`, permits each of the 86 test red-team events to match at most once, treats
+pre-attack alerts as false positives, and requires non-negative time to detection.
+
+| Detector | Alerts/day | TP | FP | Precision | Recall | F1 | Median TTD |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Brute force (≥5 failures) | 253.8 | 0 | 4,061 | 0 | 0 | 0 | — |
+| Burst (≥5 failures/5 min) | 66.7 | 0 | 1,067 | 0 | 0 | 0 | — |
+| Success after failures | 13.1 | 0 | 209 | 0 | 0 | 0 | — |
+| New source within 24 h | 19,356.5 | 32 | 309,672 | 0.0001 | 0.3721 | 0.0002 | 0 s |
+
+The zero TTD for the lateral rule is degenerate: the sampled context contains alerts at the
+same second as matched red-team events. It should not be interpreted as instant operational
+detection. The negative key-day denominator is 1,905,540; false alerts divided by that value
+form the reported FPR proxy, which is kept separate from analyst alerts per represented day.
+
+### 3.2 Engineering regression evaluation
+
 The corpus is synthetic and small, so accuracy numbers against it would be
 meaningless. The relevant results are behavioral: does the tool hold together on all
 three formats, and do the new detectors change the story only where they should?
@@ -156,7 +176,7 @@ three formats, and do the new detectors change the story only where they should?
 4 findings now yields 6 — a burst and a lateral-movement finding on top of the
 original brute-force and post-breach hits.)
 
-Test coverage was rebuilt from two failing end-to-end smoke tests into a 26-test
+Test coverage was rebuilt from two failing end-to-end smoke tests into a 43-test
 suite. The old tests failed not on logic but because they spawned a bare `python`
 subprocess that resolved to an interpreter without the project's dependencies — a
 genuine portability defect that passes only where `python` on `PATH` happens to be
@@ -168,11 +188,12 @@ the EVTX record conversion).
 
 ## 4. Limitations
 
-- The corpus is synthetic; no claim is made about detection rates on real traffic.
-- No real-data detection result is reported. The LANL evaluator (`evaluate_lanl.py`) is schema-
-  verified and streaming, but the full corpus is distributed through LANL's request form
-  (see [LANL_ACQUISITION.md](LANL_ACQUISITION.md)), so Phases 3-4 of the publication plan remain
-  to be run once the corpus is obtained.
+- LANL is de-identified research telemetry with red-team ground truth, not a complete record
+  of every malicious event in the enterprise.
+- Metrics are conditional on the 24-hour-context plus deterministic 5% background sample;
+  sampling weights would be required for population-wide alert-burden estimates.
+- The FPR value is false alerts per negative `(user, source-computer, day)` window, a proxy
+  rather than a conventional event-level population FPR.
 - Syslog year inference assumes the current year and does not handle rotation
   across a New Year boundary.
 - The lateral-movement detector compares consecutive successes only; it cannot see
@@ -183,19 +204,19 @@ the EVTX record conversion).
 
 ## 5. Future work
 
-The most valuable next step is treating these detectors as a small ensemble rather
-than independent flags — the burst, lateral, and success-after-failures detectors
-all fire on related evidence and could be combined with explicit reasoning about
-which alert the analyst should look at first. Enriching source addresses with
-threat-intelligence reputation would corroborate the volume-based detector, and
-handling EVTX timestamp quirks (such as the missing-year inference) would remove
-the last real-world assumption.
+The most valuable next experiment is a pre-registered sensitivity analysis over failure
+thresholds, burst windows, lateral horizons, and alert cooldowns, reporting campaign-level
+recall and alerts per analyst-day rather than selecting the best test setting. A stronger
+baseline should add graph- or sequence-aware scoring while retaining the same temporal split
+and one-use matching rules. Sampling-weighted alert burden and per-campaign confidence
+intervals are also needed before submission.
 
 ## 6. Conclusion
 
-The engineering value of this pass was less in the detectors, which are conventional,
-than in making them trustworthy: finding a timestamp-ordering defect that a casual
-read and the sample data both hide, fixing an environment-dependent test failure,
-and leaving behind a test suite that pins the corrected behavior. A hunting tool
-that is wrong only on inputs its own samples never reach is the most dangerous
-kind, because it looks correct. The work here was mostly about closing that gap.
+The completed LANL evaluation changes this project from an engineering demonstration into a
+defensible negative result for the tested protocol. Under a locked temporal protocol, conventional authentication-log
+rules either miss all test red-team events or create an unusable alert burden. The result does
+not show that threat hunting is ineffective; it shows that these transparent rules are not a
+sufficient detector on this sampled frame. The timestamp, split, matching, and TTD regression
+tests make that unfavorable conclusion substantially more credible than an attractive result
+obtained from a faulty evaluator.
