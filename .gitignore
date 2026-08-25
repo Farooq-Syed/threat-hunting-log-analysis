@@ -10,6 +10,9 @@ data/lanl_auth_window.parquet.stage1.txt
 data/lanl_auth_window.parquet.tmp
 data/lanl_eval_frame.parquet
 data/lanl_eval_frame.parquet.tmp
+data/lanl_frame_sorted.parquet
+data/lanl_frame_sorted.parquet.partial
+data/lanl_frame_sorted.parquet.done
 data/lanl_online.db
 data/lanl_keys.db
 data/lanl_keys_stream.db
@@ -24,4 +27,7 @@ _compact.log
 _frame.log
 _eval.log
 _online.log
+_online_bg.log
+_online_bg.err
+_online.pid
 _compact.err

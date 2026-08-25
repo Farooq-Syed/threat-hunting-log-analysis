@@ -20,7 +20,8 @@ import pyarrow.parquet as pq
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR))
 
-from scripts.online_lanl_eval import _build_sorted_sqlite, _stream_and_eval, _redteam  # noqa: E402
+from scripts.online_lanl_eval import (  # noqa: E402
+    _build_sorted_parquet, _prepare_chronological_parquet, _stream_and_eval, _redteam)
 
 DAY = 86400
 BASE = 150000  # day 1
@@ -39,13 +40,13 @@ def _run(rows, redteam_rows, split_day=2, **kw):
         f = _write_frame(rows, d / "f.parquet")
         rt_path = d / "redteam.txt"
         rt_path.write_text("\n".join(redteam_rows) + "\n")
-        db = d / "db.sqlite"
-        _build_sorted_sqlite(f, db)
+        sorted_frame = d / "sorted.parquet"
+        _build_sorted_parquet(f, sorted_frame)
         rt = _redteam(rt_path)
         res = _stream_and_eval(
-            db, rt, split_day, kw.get("delay_s", 1800),
+            sorted_frame, rt, split_day, kw.get("delay_s", 1800),
             kw.get("failed_threshold", 5), kw.get("window_s", 60),
-            kw.get("lateral_s", 86400), set(rt["user"]), set(rt["src"]) | set(rt["dst"]))
+            kw.get("lateral_s", 86400))
     return res
 
 
@@ -129,6 +130,21 @@ def test_ttd_non_negative():
     assert bf["median_ttd_s"] is None or bf["median_ttd_s"] >= 0, "TTD must be non-negative"
 
 
+def test_alert_burden_and_fpr_proxy_have_distinct_denominators():
+    rows = [
+        {"time": BASE + 2 * DAY + i * 10, "src_user": "U2@DOM1",
+         "src_computer": "C1", "dst_computer": "C2", "status": "failed"}
+        for i in range(6)
+    ]
+    res = _run(rows, [f"{BASE + 2 * DAY + 100},U1@DOM1,C9,C2"])
+    bf = res["bruteforce"]
+    assert bf["test_day_count"] == 1
+    assert bf["alerts_per_analyst_day"] == bf["n_alerts"]
+    assert bf["false_alert_key_days"] == 1
+    assert bf["negative_key_day_denominator"] == 1
+    assert bf["fpr_proxy_negative_key_days"] == 1.0
+
+
 def test_lateral_and_success_after_failures_present():
     rows = []
     # success-after-failure
@@ -146,6 +162,70 @@ def test_lateral_and_success_after_failures_present():
     assert "success_after_failures" in res
     assert "lateral" in res
     assert res["success_after_failures"]["n_alerts"] >= 1
+    assert res["lateral"]["n_alerts"] >= 1
+
+
+def test_sorted_parquet_is_chronological_and_normalizes_status():
+    rows = [
+        {"time": BASE + 30, "src_user": "U2", "src_computer": "C2",
+         "dst_computer": "C9", "status": " FAILURE "},
+        {"time": BASE + 10, "src_user": "U1", "src_computer": "C1",
+         "dst_computer": "C9", "status": "Success"},
+        {"time": BASE + 20, "src_user": "U1", "src_computer": "C1",
+         "dst_computer": "C9", "status": "FAIL"},
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        source = _write_frame(rows, d / "source.parquet")
+        output = d / "sorted.parquet"
+        _build_sorted_parquet(source, output)
+        frame = pq.read_table(output).to_pandas()
+        assert frame["time"].tolist() == sorted(frame["time"].tolist())
+        assert frame["status"].tolist() == ["success", "failed", "failed"]
+        assert output.with_suffix(".parquet.done").exists()
+
+
+def test_chronological_source_is_reused_without_copy():
+    rows = [
+        {"time": BASE + i, "src_user": "U1", "src_computer": "C1",
+         "dst_computer": "C2", "status": "success"}
+        for i in range(3)
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        source = _write_frame(rows, d / "source.parquet")
+        unused_output = d / "sorted.parquet"
+        chosen = _prepare_chronological_parquet(source, unused_output)
+        assert chosen == source
+        assert not unused_output.exists()
+
+
+def test_detectors_match_ground_truth_independently():
+    # The fifth failure triggers brute-force and burst at the same timestamp. Each detector's
+    # recall must be evaluated independently against the same red-team event.
+    event_time = BASE + 2 * DAY + 30
+    rows = [
+        {"time": BASE + 2 * DAY + i * 10, "src_user": "U1@DOM1",
+         "src_computer": "C1", "dst_computer": "C2", "status": "failed"}
+        for i in range(6)
+    ]
+    res = _run(rows, [f"{event_time},U1@DOM1,C1,C2"], failed_threshold=5, window_s=60)
+    assert res["bruteforce"]["tp"] == 1
+    assert res["burst"]["tp"] == 1
+
+
+def test_repeated_successes_preserve_lateral_semantics():
+    # Repeated events from one source must collapse to its latest timestamp; a later success
+    # from another source inside the horizon still triggers lateral movement.
+    start = BASE + 2 * DAY
+    rows = [
+        {"time": start + i, "src_user": "U1@DOM1", "src_computer": "C1",
+         "dst_computer": "C9", "status": "success"}
+        for i in range(1000)
+    ]
+    rows.append({"time": start + 1001, "src_user": "U1@DOM1", "src_computer": "C2",
+                 "dst_computer": "C9", "status": "success"})
+    res = _run(rows, [f"{start + 1000},U1@DOM1,C2,C9"], lateral_s=3600)
     assert res["lateral"]["n_alerts"] >= 1
 
 

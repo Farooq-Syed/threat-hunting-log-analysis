@@ -1,0 +1,81 @@
+{
+  "protocol": {
+    "split": "temporal-by-day",
+    "split_day": 15,
+    "delay_minutes": 30,
+    "failed_threshold": 5,
+    "window_minutes": 5,
+    "lateral_hours": 24,
+    "redteam_total": 749,
+    "redteam_train": 663,
+    "redteam_test": 86,
+    "matching": "a-priori; alert matches next red-team event for the same key within delay; no look-ahead; alert time = first threshold crossing",
+    "threshold_selection": "fixed thresholds (documented); burst window / lateral hours are locked protocol parameters",
+    "stateful": "online per-key state machines; bounded detector state; chronological stream from a reusable Arrow-sorted Parquet frame",
+    "frame_sampling": "CONDITIONAL on the sampled eval frame (context + 5% background); alert-burden and FPR-proxy are not population-wide unless sampling weights applied"
+  },
+  "detectors": {
+    "bruteforce": {
+      "n_alerts": 4061,
+      "tp": 0,
+      "fp": 4061,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "median_ttd_s": null,
+      "n_ttd": 0,
+      "recall_denominator_test_rt": 86,
+      "alert_burden_alerts": 4061,
+      "fpr_proxy_negative_key_days": 0.002131,
+      "fpr_proxy_definition": "false alerts per negative (src_user, src_computer, day) window in the test period; a PROXY for FPR, not a true population false-positive rate"
+    },
+    "burst": {
+      "n_alerts": 1067,
+      "tp": 0,
+      "fp": 1067,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "median_ttd_s": null,
+      "n_ttd": 0,
+      "recall_denominator_test_rt": 86,
+      "alert_burden_alerts": 1067,
+      "fpr_proxy_negative_key_days": 0.00056,
+      "fpr_proxy_definition": "false alerts per negative (src_user, src_computer, day) window in the test period; a PROXY for FPR, not a true population false-positive rate"
+    },
+    "success_after_failures": {
+      "n_alerts": 209,
+      "tp": 0,
+      "fp": 209,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "median_ttd_s": null,
+      "n_ttd": 0,
+      "recall_denominator_test_rt": 86,
+      "alert_burden_alerts": 209,
+      "fpr_proxy_negative_key_days": 0.00011,
+      "fpr_proxy_definition": "false alerts per negative (src_user, src_computer, day) window in the test period; a PROXY for FPR, not a true population false-positive rate"
+    },
+    "lateral": {
+      "n_alerts": 309704,
+      "tp": 32,
+      "fp": 309672,
+      "precision": 0.0001,
+      "recall": 0.3721,
+      "f1": 0.0002,
+      "median_ttd_s": 0.0,
+      "n_ttd": 32,
+      "recall_denominator_test_rt": 86,
+      "alert_burden_alerts": 309704,
+      "fpr_proxy_negative_key_days": 0.162511,
+      "fpr_proxy_definition": "false alerts per negative (src_user, src_computer, day) window in the test period; a PROXY for FPR, not a true population false-positive rate"
+    },
+    "stat_baseline": {
+      "srcs_above_threshold": 25,
+      "threshold_mean_plus_2sd": 3799.7456,
+      "note": "count-based statistical diagnostic; matching requires a user key (see online detectors)"
+    }
+  },
+  "elapsed_seconds": 1187.7
+}

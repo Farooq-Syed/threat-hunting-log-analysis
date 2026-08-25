@@ -169,19 +169,24 @@ ready to run the moment it is obtained:
 
 The evaluator is **online and stateful** (`scripts/online_lanl_eval.py`): for each
 (src_user, src_computer) key it keeps only the state each detector needs (failure/success
-counts, first/last event time, last failure time, a bounded trailing-window failure deque, a
-per-user recent-success trail, and per-detector "already alerted" flags + first-alert time).
-Events are processed chronologically (the frame is time-sorted via SQLite), and an alert is
+counts, a bounded trailing-window failure deque, and per-detector "already alerted" flags).
+For lateral movement, an ordered map retains only each user's latest timestamp per active
+source and expires stale sources; it does not retain every successful event. Events are processed
+chronologically from a Parquet frame whose global time order is verified in a streaming pass,
+and an alert is
 emitted the first time a detector's threshold is crossed. The alert time is therefore the
 **first threshold crossing**, not the last failure, so time-to-detection is valid.
 
-Correctness properties pinned by `tests/test_online_lanl_eval.py` (7 tests):
+Correctness properties pinned by `tests/test_online_lanl_eval.py` (11 tests):
 - train-period (pre-split) events never contribute to test detection;
 - only **test-period** red-team events are in the recall denominator;
 - red-team matching is keyed by **(src_user, src_computer)**, not source alone;
-- each red-team event can be matched at most once (no reuse);
+- each red-team event can be matched at most once **within each detector**, while detectors are
+  evaluated independently and may detect the same event;
 - pre-attack alerts (before the ground-truth event) are **false positives**;
-- time-to-detection is **non-negative** (alert must occur at/after the red-team event).
+- time-to-detection is **non-negative** (alert must occur at/after the red-team event);
+- the Parquet input is actually chronological, chronological inputs are reused without a copy,
+  and outcome labels are normalized before detection.
 
 **FPR and alert-burden are separate metrics.** `alerts_per_analyst_day` is the raw alert
 burden. `fpr_proxy` is reported as false alerts per **negative (key, day)** window in the test
@@ -189,8 +194,11 @@ period (a documented proxy for FPR, because the negative denominator is key-day 
 defined negative-event set). Both are **conditional on the sampled eval frame** — they are not
 population-wide unless sampling weights are applied.
 
-The 24-hour context window intentionally produces a large frame (a documented consequence of
-the detector's temporal horizon); the online evaluator is the memory-safe way to run it.
+The 24-hour context window intentionally produces a 314,683,765-row frame (a documented
+consequence of the detector's temporal horizon). The locked frame was verified across all
+314,683,765 timestamps as globally monotonic, so the evaluator streams it directly with bounded
+per-key detector state—no SQLite index or duplicate 2 GB sorted file is required. For a future
+unsorted input, the script can create and reuse an Arrow-sorted artifact when memory permits.
 
 ---
 

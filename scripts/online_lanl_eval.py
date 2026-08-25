@@ -11,15 +11,16 @@ Implements the full locked protocol's detector set as an *online stateful* evalu
   * lateral-change:   recent-success (time, src) trail per user; the first success from a new
                       source inside the window.
 
-Events are processed in **chronological order** (the frame is time-sorted via SQLite). An
+Events are processed in **chronological order** from a reusable time-sorted Parquet file. An
 alert is emitted the first time a detector's threshold is crossed, and the crossing timestamp
 is the alert time — so time-to-detection is the delay from the red-team event to that first
 crossing, never the last failure. Matching is a-priori: an alert matches the next red-team
 event for the same key within the delay window (no look-ahead).
 
-Memory-safe: per-key state is bounded (counts + a small deque + a recent-success trail); the
-full event sequence is never held in RAM. The SQLite per-key-counts pass used during
-development is a performance diagnostic only; this is the publication pipeline.
+The detector pass is memory-bounded: per-key state contains counts, short failure deques, and
+the latest timestamp for each active user/source pair. The evaluator verifies chronological
+order before detection. The locked 314M-row frame already preserves LANL time order, so it is
+streamed directly without a database, index build, or duplicate sorted artifact.
 
 Usage:
   python scripts/online_lanl_eval.py --input data/lanl_eval_frame.parquet \
@@ -34,13 +35,14 @@ import argparse
 import csv
 import gzip
 import json
-import sqlite3
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 DAY_SECONDS = 86400
@@ -61,40 +63,92 @@ def _redteam(path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _build_sorted_sqlite(frame_path: Path, db_path: Path) -> None:
-    """Stream the frame into a SQLite table with a time-first index (chronological order)."""
-    import sqlite3 as sq
+def _times_are_sorted(values: pa.ChunkedArray) -> bool:
+    """Verify monotonic time without combining all Arrow chunks into another large array."""
+    previous = None
+    for chunk in values.chunks:
+        arr = chunk.to_numpy(zero_copy_only=False)
+        if len(arr) == 0:
+            continue
+        if previous is not None and arr[0] < previous:
+            return False
+        if len(arr) > 1 and np.any(np.diff(arr) < 0):
+            return False
+        previous = arr[-1]
+    return True
 
-    conn = sq.connect(db_path)
-    conn.execute("DROP TABLE IF EXISTS ev")
-    conn.execute("CREATE TABLE ev (time INT, src_user TEXT, src_computer TEXT, "
-                 "dst_computer TEXT, status TEXT, day INT)")
+
+def _parquet_is_chronological(path: Path, batch_size: int = 2_000_000) -> bool:
+    """Check global monotonic time in a bounded-memory streaming pass."""
+    previous = None
+    pf = pq.ParquetFile(path)
+    for batch in pf.iter_batches(batch_size=batch_size, columns=["time"]):
+        arr = batch.column(0).to_numpy(zero_copy_only=False)
+        if len(arr) == 0:
+            continue
+        if previous is not None and arr[0] < previous:
+            return False
+        if len(arr) > 1 and np.any(np.diff(arr) < 0):
+            return False
+        previous = arr[-1]
+    return True
+
+
+def _build_sorted_parquet(frame_path: Path, sorted_path: Path) -> None:
+    """Create an atomically-written, chronologically sorted evaluation frame.
+
+    The source frame is about 2 GB for the locked LANL run. Arrow handled the 314M-row
+    time sort on the evaluation machine, whereas SQLite's row-wise load/index path did not.
+    """
+    columns = ["time", "src_user", "src_computer", "dst_computer", "status"]
     pf = pq.ParquetFile(frame_path)
-    total = 0
-    buf = []
-    for batch in pf.iter_batches(batch_size=1_000_000, columns=[
-            "time", "src_user", "src_computer", "dst_computer", "status"]):
-        t = batch.to_pandas()
-        t["status"] = t["status"].str.strip().str.lower().map(
-            lambda s: "failed" if s in ("fail", "failed", "failure") else "success")
-        t["day"] = (t["time"] // DAY_SECONDS).astype(int)
-        buf.extend(t[["time", "src_user", "src_computer", "dst_computer", "status", "day"]]
-                   .itertuples(index=False, name=None))
-        if len(buf) >= 2_000_000:
-            conn.executemany("INSERT INTO ev VALUES(?,?,?,?,?,?)", buf)
-            conn.commit()
-            buf = []
-        total += len(t)
-    if buf:
-        conn.executemany("INSERT INTO ev VALUES(?,?,?,?,?,?)", buf)
-        conn.commit()
-    conn.execute("CREATE INDEX IF NOT EXISTS ix_ev_time ON ev(time, src_user, src_computer)")
-    conn.commit()
-    conn.close()
-    print(f"sorted sqlite built: {total:,} rows")
+    table = pf.read(columns=columns)
+    status = pc.utf8_lower(pc.utf8_trim_whitespace(table["status"]))
+    failed = pc.is_in(status, value_set=pa.array(["fail", "failed", "failure"]))
+    normalized = pc.if_else(failed, pa.scalar("failed"), pa.scalar("success"))
+    table = table.set_column(table.schema.get_field_index("status"), "status", normalized)
+
+    order = pc.sort_indices(table, sort_keys=[
+        ("time", "ascending"), ("src_user", "ascending"),
+        ("src_computer", "ascending")])
+    table = table.take(order)
+    if not _times_are_sorted(table["time"]):
+        raise RuntimeError("Arrow sort verification failed: time is not monotonic")
+
+    sorted_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = sorted_path.with_suffix(sorted_path.suffix + ".partial")
+    pq.write_table(table, temporary, compression="snappy", row_group_size=1_000_000)
+    temporary.replace(sorted_path)
+    marker = sorted_path.with_suffix(sorted_path.suffix + ".done")
+    marker.write_text(json.dumps({
+        "completed": True,
+        "source": str(frame_path.resolve()),
+        "source_size": frame_path.stat().st_size,
+        "rows": table.num_rows,
+        "minimum_time": int(pc.min(table["time"]).as_py()),
+        "maximum_time": int(pc.max(table["time"]).as_py()),
+        "sorted_by": ["time", "src_user", "src_computer"],
+    }, indent=2), encoding="utf-8")
+    print(f"sorted parquet built: {table.num_rows:,} rows -> {sorted_path}", flush=True)
 
 
-def _false_positive_keys(conn_path: Path, alerts_items: list, split_day: int) -> list:
+def _prepare_chronological_parquet(frame_path: Path, sorted_path: Path,
+                                   rebuild_sorted: bool = False) -> Path:
+    """Reuse an already chronological source; otherwise build/reuse a sorted artifact."""
+    if _parquet_is_chronological(frame_path):
+        print(f"verified chronological source frame: {frame_path}", flush=True)
+        return frame_path
+    marker = sorted_path.with_suffix(sorted_path.suffix + ".done")
+    if rebuild_sorted or not (sorted_path.exists() and marker.exists()):
+        _build_sorted_parquet(frame_path, sorted_path)
+    elif not _parquet_is_chronological(sorted_path):
+        raise RuntimeError(f"completed sorted artifact is not chronological: {sorted_path}")
+    else:
+        print(f"reusing completed sorted frame: {sorted_path}", flush=True)
+    return sorted_path
+
+
+def _false_positive_keys(alerts_items: list) -> list:
     """Return the (src_user, src_computer, day) windows for false-positive alerts."""
     fps = []
     for at, u, s, hit, rt_t in alerts_items:
@@ -103,32 +157,20 @@ def _false_positive_keys(conn_path: Path, alerts_items: list, split_day: int) ->
     return fps
 
 
-def _count_negative_key_days(db_path: Path, split_day: int, rt_test: pd.DataFrame) -> int:
+def _count_negative_key_days(test_key_days: set[tuple[str, str, int]],
+                             rt_test: pd.DataFrame) -> int:
     """Count (src_user, src_computer, day) windows in the test period with NO red-team event.
 
     Used as the negative denominator for the documented FPR proxy. Red-team windows (positive)
     are the (user, src, day) combinations that actually carry a red-team event.
     """
-    import sqlite3
-
-    conn = sqlite3.connect(db_path)
-    rows = conn.execute(
-        "SELECT DISTINCT src_user, src_computer, day FROM ev WHERE day >= ?", (split_day,)).fetchall()
-    conn.close()
-    # build the set of positive (user, src, day) windows from the test red-team
-    positive = set()
-    for _, r in rt_test.iterrows():
-        positive.add((r["user"], r["src"], int(r["time"]) // DAY_SECONDS))
-    negative = 0
-    for u, s, d in rows:
-        if (u, s, d) not in positive:
-            negative += 1
-    return negative
+    positive = {(r["user"], r["src"], int(r["time"]) // DAY_SECONDS)
+                for _, r in rt_test.iterrows()}
+    return len(test_key_days - positive)
 
 
-def _stream_and_eval(db_path: Path, rt: pd.DataFrame, split_day: int, delay_s: int,
-                     failed_threshold: int, window_s: int, lateral_s: int,
-                     scope_users: set[str], scope_computers: set[str]) -> dict:
+def _stream_and_eval(sorted_path: Path, rt: pd.DataFrame, split_day: int, delay_s: int,
+                     failed_threshold: int, window_s: int, lateral_s: int) -> dict:
     """Chronological pass maintaining per-key online state; emit alerts at first crossing.
 
     Temporal split: only TEST events (day >= split_day) are processed for detection; TRAIN
@@ -136,7 +178,6 @@ def _stream_and_eval(db_path: Path, rt: pd.DataFrame, split_day: int, delay_s: i
     Red-team matching is keyed by (src_user, src_computer). Recall uses only red-team events
     in the test period, and each red-team event can be matched at most once.
     """
-    conn = sqlite3.connect(db_path)
     # Red-team for the test period, indexed by (src_user, src_computer).
     rt_test = rt[rt["time"] // DAY_SECONDS >= split_day].copy()
     rt_train = rt[rt["time"] // DAY_SECONDS < split_day]
@@ -145,85 +186,100 @@ def _stream_and_eval(db_path: Path, rt: pd.DataFrame, split_day: int, delay_s: i
         key = (r["user"], r["src"])
         rt_by_key.setdefault(key, []).append((int(r["time"]), r["dst"]))
 
-    # Train-period statistics (per src_computer failure rate) for the statistical baseline.
-    conn2 = sqlite3.connect(db_path)
-    train_fail_rows = conn2.execute(
-        "SELECT src_computer, COUNT(*) as n FROM ev WHERE day < ? AND status='failed' "
-        "GROUP BY src_computer", (split_day,)).fetchall()
-    conn2.close()
-    train_fail = pd.DataFrame(train_fail_rows, columns=["src_computer", "n"])
+    for values in rt_by_key.values():
+        values.sort()
 
-    # Per-key online state (only for test-period events).
-    state = {}
-    # Per-USER recent success trail (for lateral movement: a user switching source computers).
-    user_trail: dict[str, deque] = {}
+    train_fail_counts: dict[str, int] = {}
+    test_fail_counts: dict[str, int] = {}
+    test_first_fail: dict[str, int] = {}
+    test_key_days: set[tuple[str, str, int]] = set()
+
+    # Per-key failure state; success-only keys do not allocate this structure.
+    state: dict[tuple[str, str], dict] = {}
+    bf_alerted: set[tuple[str, str]] = set()
+    burst_alerted: set[tuple[str, str]] = set()
+    saf_alerted: set[tuple[str, str]] = set()
+    lateral_alerted: set[tuple[str, str]] = set()
+    # Per-user active sources ordered by their latest timestamp. Updating a source moves it to
+    # the end, so repeated successes do not create duplicate heap/deque entries. Memory is
+    # bounded by distinct active (user, source) pairs rather than by event count.
+    user_source_latest: dict[str, OrderedDict[str, int]] = {}
     alerts = []  # (detector, alert_time, src_user, src_computer)
 
-    cursor = conn.execute(
-        "SELECT time, src_user, src_computer, dst_computer, status, day FROM ev "
-        "ORDER BY time, src_user, src_computer")
-    total = 0
+    pf = pq.ParquetFile(sorted_path)
+    previous_time = None
     test_events = 0
-    for time_v, u, s, dst, status, day in cursor:
-        if day < split_day:
-            continue  # train-period events are excluded from detection (temporal split)
-        test_events += 1
-        key = (u, s)
-        st = state.setdefault(key, {
-            "nfail": 0, "nsucc": 0, "last_event": None, "last_fail": None,
-            "fail_deque": deque(),
-            "bf_alerted": False, "bf_time": None,
-            "burst_alerted": False, "burst_time": None,
-            "saf_run": 0, "saf_alerted": False, "saf_time": None,
-            "recent_succ": deque(), "lat_alerted": False, "lat_time": None,
-        })
-        if st["last_event"] is not None and time_v < st["last_event"]:
+    columns = ["time", "src_user", "src_computer", "dst_computer", "status"]
+    for batch in pf.iter_batches(batch_size=1_000_000, columns=columns):
+        frame = batch.to_pandas()
+        if len(frame) == 0:
             continue
-        st["last_event"] = time_v
-        if status == "failed":
-            st["nfail"] += 1
-            st["last_fail"] = time_v
-            if not st["bf_alerted"] and st["nfail"] >= failed_threshold:
-                st["bf_alerted"] = True
-                st["bf_time"] = time_v
-                alerts.append(("bruteforce", time_v, u, s))
-            dq = st["fail_deque"]
-            dq.append(time_v)
-            while dq and dq[0] < time_v - window_s:
-                dq.popleft()
-            if not st["burst_alerted"] and len(dq) >= failed_threshold:
-                st["burst_alerted"] = True
-                st["burst_time"] = time_v
-                alerts.append(("burst", time_v, u, s))
-            st["saf_run"] += 1
-        else:  # success
-            st["nsucc"] += 1
-            if not st["saf_alerted"] and st["saf_run"] >= failed_threshold:
-                st["saf_alerted"] = True
-                st["saf_time"] = time_v
-                alerts.append(("success_after_failures", time_v, u, s))
-            st["saf_run"] = 0
-            # lateral movement is per USER: a user succeeding from a different source
-            # computer than a prior success within the window.
-            trail = user_trail.setdefault(u, deque())
-            prior_srcs = {x[1] for x in trail if x[1] != s}
-            trail.append((time_v, s))
-            while trail and trail[0][0] < time_v - lateral_s:
-                trail.popleft()
-            if not st["lat_alerted"] and prior_srcs:
-                st["lat_alerted"] = True
-                st["lat_time"] = time_v
-                alerts.append(("lateral", time_v, u, s))
-        total += 1
-        if total % 20_000_000 == 0:
-            print(f"  ... processed {total:,} test events", flush=True)
-    conn.close()
+        frame["status"] = frame["status"].str.strip().str.lower().map(
+            lambda value: "failed" if value in ("fail", "failed", "failure") else "success")
+        first_time = int(frame["time"].iloc[0])
+        if previous_time is not None and first_time < previous_time:
+            raise RuntimeError("sorted Parquet is not chronological")
+        previous_time = int(frame["time"].iloc[-1])
+
+        train = frame[(frame["time"] // DAY_SECONDS) < split_day]
+        train_failed = train[train["status"] == "failed"]
+        if len(train_failed):
+            for src, count in train_failed.groupby("src_computer", sort=False).size().items():
+                train_fail_counts[src] = train_fail_counts.get(src, 0) + int(count)
+
+        test = frame[(frame["time"] // DAY_SECONDS) >= split_day]
+        for time_v, u, s, dst, status in test.itertuples(index=False, name=None):
+            time_v = int(time_v)
+            day = time_v // DAY_SECONDS
+            test_events += 1
+            key = (u, s)
+            test_key_days.add((u, s, day))
+            if status == "failed":
+                test_fail_counts[s] = test_fail_counts.get(s, 0) + 1
+                test_first_fail.setdefault(s, time_v)
+                st = state.setdefault(key, {"nfail": 0, "fail_deque": deque(), "saf_run": 0})
+                st["nfail"] += 1
+                if key not in bf_alerted and st["nfail"] >= failed_threshold:
+                    bf_alerted.add(key)
+                    alerts.append(("bruteforce", time_v, u, s))
+                dq = st["fail_deque"]
+                dq.append(time_v)
+                while dq and dq[0] < time_v - window_s:
+                    dq.popleft()
+                if key not in burst_alerted and len(dq) >= failed_threshold:
+                    burst_alerted.add(key)
+                    alerts.append(("burst", time_v, u, s))
+                st["saf_run"] += 1
+            else:  # success
+                st = state.get(key)
+                if st is not None:
+                    if key not in saf_alerted and st["saf_run"] >= failed_threshold:
+                        saf_alerted.add(key)
+                        alerts.append(("success_after_failures", time_v, u, s))
+                    st["saf_run"] = 0
+
+                latest = user_source_latest.setdefault(u, OrderedDict())
+                cutoff = time_v - lateral_s
+                while latest:
+                    oldest_src, oldest_time = next(iter(latest.items()))
+                    if oldest_time >= cutoff:
+                        break
+                    latest.popitem(last=False)
+                has_other_source = len(latest) > (1 if s in latest else 0)
+                if s in latest:
+                    del latest[s]
+                latest[s] = time_v
+                if key not in lateral_alerted and has_other_source:
+                    lateral_alerted.add(key)
+                    alerts.append(("lateral", time_v, u, s))
+
+            if test_events % 20_000_000 == 0:
+                print(f"  ... processed {test_events:,} test events", flush=True)
 
     # ---- match alerts to red-team (a-priori, keyed by (user, src), no look-ahead) ----
-    # Each red-team event is matched at most once; alerts BEFORE the ground-truth event are FPs.
-    matched_rt = set()  # (rt_t, user, src)
-
-    def match_alert(at, u, s):
+    # Each red-team event is matched at most once PER DETECTOR. Different detectors are
+    # evaluated independently and therefore may legitimately detect the same ground-truth event.
+    def match_alert(at, u, s, matched_rt):
         for (rt_t, rt_dst) in rt_by_key.get((u, s), []):
             if rt_t <= at <= rt_t + delay_s and (rt_t, u, s) not in matched_rt:
                 return True, rt_t
@@ -233,14 +289,19 @@ def _stream_and_eval(db_path: Path, rt: pd.DataFrame, split_day: int, delay_s: i
         return False, None
 
     # Track per-detector alerts
-    alerts_by_det: dict[str, list] = {}
+    detector_names = ("bruteforce", "burst", "success_after_failures", "lateral")
+    alerts_by_det: dict[str, list] = {name: [] for name in detector_names}
+    matched_by_detector: dict[str, set] = {name: set() for name in detector_names}
     for det, at, u, s in alerts:
-        hit, rt_t = match_alert(at, u, s)
+        hit, rt_t = match_alert(at, u, s, matched_by_detector[det])
         if hit:
-            matched_rt.add((rt_t, u, s))
+            matched_by_detector[det].add((rt_t, u, s))
         alerts_by_det.setdefault(det, []).append((at, u, s, hit, rt_t))
 
     n_test_rt = len(rt_test)
+    test_days = {day for _, _, day in test_key_days}
+    n_test_days = len(test_days)
+    n_negative_key_days = _count_negative_key_days(test_key_days, rt_test)
     out = {}
     for det, items in alerts_by_det.items():
         tp = 0
@@ -260,26 +321,30 @@ def _stream_and_eval(db_path: Path, rt: pd.DataFrame, split_day: int, delay_s: i
         # period, i.e. keys/days with no red-team activity. We report alert-burden separately
         # and a documented PROXY FPR as false alerts per negative key-day (a proxy because it
         # uses key-day windows as the negative denominator, not a defined negative-event set).
-        fp_keys = _false_positive_keys(conn_path=db_path, alerts_items=items, split_day=split_day)
-        n_negative_key_days = _count_negative_key_days(db_path, split_day, rt_test)
+        fp_key_days = set(_false_positive_keys(alerts_items=items))
         out[det] = {
             "n_alerts": n_al, "tp": tp, "fp": fp,
             "precision": round(precision, 4), "recall": round(recall, 4), "f1": round(f1, 4),
             "median_ttd_s": float(np.median(ttd)) if ttd else None, "n_ttd": len(ttd),
             "recall_denominator_test_rt": int(n_test_rt),
+            "test_event_count": int(test_events),
+            "test_day_count": int(n_test_days),
             "alert_burden_alerts": n_al,
-            "fpr_proxy_negative_key_days": round(fp / n_negative_key_days, 6) if n_negative_key_days else None,
+            "alerts_per_analyst_day": round(n_al / n_test_days, 4) if n_test_days else None,
+            "false_alert_key_days": int(len(fp_key_days)),
+            "negative_key_day_denominator": int(n_negative_key_days),
+            "fpr_proxy_negative_key_days": (
+                round(len(fp_key_days) / n_negative_key_days, 6)
+                if n_negative_key_days else None),
             "fpr_proxy_definition": ("false alerts per negative (src_user, src_computer, day) "
                                      "window in the test period; a PROXY for FPR, not a true "
                                      "population false-positive rate"),
         }
     # Statistical baseline: per-src failure count in TEST vs train mean+k*sd.
-    conn3 = sqlite3.connect(db_path)
-    rows3 = conn3.execute(
-        "SELECT src_computer, COUNT(*) as n, MIN(time) as first_fail FROM ev "
-        "WHERE day >= ? AND status='failed' GROUP BY src_computer", (split_day,)).fetchall()
-    conn3.close()
-    test_fail = pd.DataFrame(rows3, columns=["src_computer", "n", "first_fail"])
+    train_fail = pd.DataFrame(list(train_fail_counts.items()), columns=["src_computer", "n"])
+    test_fail = pd.DataFrame([
+        (src, count, test_first_fail[src]) for src, count in test_fail_counts.items()
+    ], columns=["src_computer", "n", "first_fail"])
     mu = float(train_fail["n"].mean()) if len(train_fail) else 0.0
     sd = float(train_fail["n"].std()) if len(train_fail) > 1 else 0.0
     thr = mu + 2.0 * sd
@@ -301,22 +366,24 @@ def main() -> None:
     ap.add_argument("--failed-threshold", type=int, default=5)
     ap.add_argument("--window-minutes", type=int, default=5)
     ap.add_argument("--lateral-hours", type=int, default=24)
+    ap.add_argument("--sorted-frame", default="data/lanl_frame_sorted.parquet",
+                    help="Reusable time-sorted Parquet built from --input")
+    ap.add_argument("--rebuild-sorted", action="store_true",
+                    help="Rebuild the sorted Parquet even when a completed artifact exists")
     ap.add_argument("--output", default="results/lanl_online.json")
     args = ap.parse_args()
 
     start = time.time()
     rt = _redteam(Path(args.redteam))
-    scope_users = set(rt["user"])
-    scope_computers = set(rt["src"]) | set(rt["dst"])
     rt_test = rt[rt["time"] // DAY_SECONDS >= args.split_day]
     rt_train = rt[rt["time"] // DAY_SECONDS < args.split_day]
-    db = Path("data/lanl_online.db")
-    if db.exists():
-        db.unlink()
-    _build_sorted_sqlite(Path(args.input), db)
+    frame = Path(args.input)
+    sorted_frame = Path(args.sorted_frame)
+    chronological_frame = _prepare_chronological_parquet(
+        frame, sorted_frame, rebuild_sorted=args.rebuild_sorted)
     results = _stream_and_eval(
-        db, rt, args.split_day, args.delay_minutes * 60, args.failed_threshold,
-        args.window_minutes * 60, args.lateral_hours * 3600, scope_users, scope_computers)
+        chronological_frame, rt, args.split_day, args.delay_minutes * 60, args.failed_threshold,
+        args.window_minutes * 60, args.lateral_hours * 3600)
 
     payload = {
         "protocol": {
@@ -330,7 +397,8 @@ def main() -> None:
                         "delay; no look-ahead; alert time = first threshold crossing",
             "threshold_selection": "fixed thresholds (documented); burst window / lateral hours "
                                    "are locked protocol parameters",
-            "stateful": "online per-key state machines; bounded memory; chronological pass",
+            "stateful": "online per-key state machines; bounded detector state; chronological "
+                        "stream from a reusable Arrow-sorted Parquet frame",
             "frame_sampling": "CONDITIONAL on the sampled eval frame (context + 5% background); "
                               "alert-burden and FPR-proxy are not population-wide unless "
                               "sampling weights applied",
@@ -340,11 +408,16 @@ def main() -> None:
     }
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary = out.with_suffix(out.suffix + ".partial")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(out)
     print(f"Wrote -> {out}")
     for det, r in results.items():
-        print(f"  {det:24} P={r['precision']} R={r['recall']} F1={r['f1']} "
-              f"alerts={r['n_alerts']} TTD={r['median_ttd_s']}s")
+        if "precision" in r:
+            print(f"  {det:24} P={r['precision']} R={r['recall']} F1={r['f1']} "
+                  f"alerts={r['n_alerts']} TTD={r['median_ttd_s']}s")
+        else:
+            print(f"  {det:24} {r}")
 
 
 if __name__ == "__main__":
