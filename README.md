@@ -37,13 +37,14 @@ computers, authentication and logon types, orientation, and outcome. LANL source
 computers are retained as source identifiers in the normalized `source_ip` field so
 the existing hunting layer can operate without inventing network addresses.
 
-The parser is tested against the official schema examples. A full external detection
-result is not claimed here: LANL distributes the 7.2 GB authentication corpus through
-a download form, and the complete corpus plus the red-team ground truth must be run
-before reporting operational recall or false-positive rates. The **research question
-and the locked, leakage-resistant evaluation protocol** are defined in
-[PUBLICATION_PLAN.md](PUBLICATION_PLAN.md); the manual data-request steps are in
-[LANL_ACQUISITION.md](LANL_ACQUISITION.md).
+The parser and locked temporal protocol have now been run on a 314,683,765-event sampled
+evaluation frame derived from the official authentication corpus. With day 15 as the split,
+the failure-count, burst, and success-after-failure detectors detected none of 86 test-period
+red-team events. The lateral detector detected 32/86 (recall 0.3721) but generated 309,704
+alerts (precision 0.0001; about 19,357 alerts per represented test day). This is a negative
+result: these simple detectors do not provide usable separation on this frame. Full metrics
+and caveats are in [REAL_DATA_RESULTS.md](REAL_DATA_RESULTS.md); the locked protocol is in
+[PUBLICATION_PLAN.md](PUBLICATION_PLAN.md).
 
 After obtaining the files from LANL, the streaming evaluator avoids loading the full
 corpus into memory and records input hashes plus the official DOI:
@@ -53,9 +54,10 @@ python evaluate_lanl.py --auth auth.txt.gz --redteam redteam.txt.gz `
   --output results/lanl_external_validation.json
 ```
 
-The evaluator reports exact ground-truth event coverage and lateral-movement pair
-recall for red-team users. Its candidate precision is explicitly scoped to those users
-and must not be presented as a global false-positive rate.
+The online evaluator reports event recall, precision, F1, time-to-detection, raw and per-day
+alert burden, and a key-day FPR proxy. Alert burden and the FPR proxy are conditional on the
+24-hour-context plus deterministic 5% background frame and must not be presented as
+population-wide operational rates.
 
 ## Features
 

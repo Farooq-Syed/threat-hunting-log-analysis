@@ -11,12 +11,12 @@ day 15: test-period red-team events = **86**. Online detectors emit an alert at 
 threshold crossing**; matching is keyed by (src_user, src_computer), no look-ahead, each
 red-team event matched once, pre-attack alerts are false positives.
 
-| Detector | alerts | TP | FP | precision | recall | F1 | median TTD | FPR-proxy |
-|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| brute-force (≥5 failures) | 4,061 | 0 | 4,061 | 0.0000 | 0.0000 | 0.0000 | — | 0.0021 |
-| burst (≥5 in 5-min window) | 1,067 | 0 | 1,067 | 0.0000 | 0.0000 | 0.0000 | — | 0.0006 |
-| success-after-failure | 209 | 0 | 209 | 0.0000 | 0.0000 | 0.0000 | — | 0.0001 |
-| lateral (new source in 24h) | 309,704 | 32 | 309,672 | 0.0001 | 0.3721 | 0.0002 | 0 s | 0.1625 |
+| Detector | alerts | alerts/day | TP | FP | precision | recall | F1 | median TTD | FPR-proxy |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| brute-force (≥5 failures) | 4,061 | 253.8 | 0 | 4,061 | 0.0000 | 0.0000 | 0.0000 | — | 0.0021 |
+| burst (≥5 in 5-min window) | 1,067 | 66.7 | 0 | 1,067 | 0.0000 | 0.0000 | 0.0000 | — | 0.0006 |
+| success-after-failure | 209 | 13.1 | 0 | 209 | 0.0000 | 0.0000 | 0.0000 | — | 0.0001 |
+| lateral (new source in 24h) | 309,704 | 19,356.5 | 32 | 309,672 | 0.0001 | 0.3721 | 0.0002 | 0 s | 0.1625 |
 
 Statistical baseline: per-source failure count in test vs train mean + 2σ (threshold 3,799
 failures/source); 25 test sources exceed it (count-only diagnostic; not user-keyed matching).
@@ -27,7 +27,7 @@ failures/source); 25 test sources exceed it (count-only diagnostic; not user-key
   of the 86 test-period red-team events (recall 0). Their alerts are all false positives.
 - Lateral-movement detects 32/86 red-team events (recall 0.37) but at **catastrophic
   precision** (0.0001): 309,672 false positives. The alert burden is unusable for an analyst
-  (≈309k alerts, FPR-proxy 0.16 per negative key-day).
+  (≈19,357 alerts per represented test day; FPR-proxy 0.16 per negative key-day).
 - This is a **complete, honest negative result** on this frame: simple count/correlation
   detectors do not separate LANL red-team activity from benign background under the locked
   temporal protocol.
@@ -37,8 +37,9 @@ failures/source); 25 test sources exceed it (count-only diagnostic; not user-key
 - **Conditional on the sampled frame.** Alert-burden and FPR-proxy are NOT population-wide;
   they are conditional on the 24h-context + 5%-background sample and would need sampling
   weights to generalize.
-- **FPR-proxy** = false alerts per negative (src_user, src_computer, day) window; it is a
-  documented proxy, not a true population false-positive rate.
+- **FPR-proxy** = distinct false-alert (src_user, src_computer, day) windows divided by
+  **1,905,540 negative key-day windows**; it is a documented proxy, not a true population
+  false-positive rate. Alert burden is reported separately over 16 represented test days.
 - TTD = 0 s for lateral because the 24h context window captures alerts within the same second
   as the red-team events; median TTD is degenerate at this sampling/context.
 - The 24h context window is a documented consequence of the detector's temporal horizon.
@@ -55,12 +56,12 @@ python scripts/compact_lanl_auth.py --auth E:/auth.txt --redteam <redteam>.gz \
 python scripts/build_lanl_eval_frame.py --input data/lanl_auth_window.parquet \
     --redteam <redteam>.gz --context-hours 24 --keep-frac 0.05 \
     --output data/lanl_eval_frame.parquet
-# 3. Sort the frame by time -> data/lanl_frame_sorted.parquet (~13 min)
-# 4. Online evaluation -> results/lanl_online.json
+# 3. Online evaluation. The script verifies global chronological order first and reuses this
+#    source frame directly; it creates a sorted artifact only for a future unsorted input.
 python scripts/online_lanl_eval.py --input data/lanl_eval_frame.parquet \
     --redteam <redteam>.gz --split-day 15 --delay-minutes 30 \
     --failed-threshold 5 --window-minutes 5 --lateral-hours 24 \
-    --sorted-frame data/lanl_frame_sorted.parquet --output results/lanl_online.json
+    --output results/lanl_online.json
 ```
 
 All large intermediate files are gitignored (regenerable from the raw E: corpus). The small

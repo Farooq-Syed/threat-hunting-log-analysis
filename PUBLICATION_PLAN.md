@@ -177,7 +177,7 @@ and an alert is
 emitted the first time a detector's threshold is crossed. The alert time is therefore the
 **first threshold crossing**, not the last failure, so time-to-detection is valid.
 
-Correctness properties pinned by `tests/test_online_lanl_eval.py` (11 tests):
+Correctness properties pinned by `tests/test_online_lanl_eval.py` (12 tests):
 - train-period (pre-split) events never contribute to test detection;
 - only **test-period** red-team events are in the recall denominator;
 - red-team matching is keyed by **(src_user, src_computer)**, not source alone;
@@ -189,7 +189,8 @@ Correctness properties pinned by `tests/test_online_lanl_eval.py` (11 tests):
   and outcome labels are normalized before detection.
 
 **FPR and alert-burden are separate metrics.** `alerts_per_analyst_day` is the raw alert
-burden. `fpr_proxy` is reported as false alerts per **negative (key, day)** window in the test
+burden divided by the number of represented test days. `fpr_proxy` is reported as distinct
+false-alert **(key, day)** windows divided by all negative **(key, day)** windows in the test
 period (a documented proxy for FPR, because the negative denominator is key-day windows, not a
 defined negative-event set). Both are **conditional on the sampled eval frame** — they are not
 population-wide unless sampling weights are applied.
